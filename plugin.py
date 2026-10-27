@@ -634,7 +634,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
     async def handle_phone_slack_off(
         self,
         app: str = "b站",
-        duration_seconds: int = 60,
+        duration_seconds: int = 25,
         share_to_chat: bool = True,
         **kwargs,
     ) -> Dict[str, Any]:
@@ -646,7 +646,8 @@ class PhoneControllerPlugin(MaiBotPlugin):
         if not cfg.slack_off.enabled:
             return {"success": False, "message": "自主摸鱼功能已在插件配置中关闭"}
 
-        duration = max(10, min(duration_seconds, 300))
+        # 对话交互场景下摸鱼时长上限设为 35 秒，确保总耗时在 Host RPC 60s 超时内
+        duration = max(10, min(duration_seconds, 35))
         stream_id = kwargs.get("stream_id")
 
         async def _on_share(image_path: str, caption: str):

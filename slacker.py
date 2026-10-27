@@ -169,9 +169,13 @@ class SlackerEngine:
         shared_snapshots: List[str] = []
 
         try:
-            # 1. 确保屏幕亮起并解锁到前台
-            await self.adb.press_key("power")  # 如果灭屏则点亮
-            await asyncio.sleep(0.5)
+            # 1. 确保屏幕亮起并解锁到前台（若本来就亮着则不按电源键，防误熄屏）
+            st = await self.adb.get_status()
+            if not st.get("screen_on"):
+                await self.adb.press_key("power")  # 灭屏才点亮
+                await asyncio.sleep(0.5)
+                await self.adb.swipe(540, 1800, 540, 600, 300)  # 上滑解锁
+                await asyncio.sleep(0.5)
 
             # 2. 启动目标 App
             app_info = SLACK_APPS.get(app_name.lower())
@@ -181,7 +185,7 @@ class SlackerEngine:
             logger.info("麦麦开始摸鱼啦，正在启动: %s", display_name)
             await self.adb.open_app(target_pkg)
             # 等待应用冷启动与开屏广告加载
-            await asyncio.sleep(4.0)
+            await asyncio.sleep(3.0)
 
             # 3. 循环摸鱼浏览
             start_time = time.time()
