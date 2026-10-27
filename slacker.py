@@ -73,6 +73,16 @@ class SlackerEngine:
 
         return await self.adb.swipe(x1, y1, x2, y2, duration_ms=duration)
 
+    async def dismiss_splash_ad(self) -> bool:
+        """智能探测并自动点击开屏广告的跳过按钮（跳过/跳过广告/关闭）"""
+        for skip_kw in ["跳过", "跳过广告", "关闭"]:
+            ok, _ = await self.adb.tap_text(skip_kw)
+            if ok:
+                logger.info("已自动点击跳过开屏广告: %s", skip_kw)
+                await asyncio.sleep(0.8)
+                return True
+        return False
+
     async def extract_screen_topics(self) -> List[str]:
         """抓取当前屏幕上的有价值文本（标题、热点、动态）"""
         ok, elements, _ = await self.adb.dump_ui_elements()
@@ -90,6 +100,28 @@ class SlackerEngine:
 
         return topics[:10]
 
+    @staticmethod
+    def _is_safe_custom_url(url: str) -> bool:
+        """严格校验自定义 LLM URL（防范 SSRF 探测本地/内网/敏感云元数据端点）"""
+        if not url or not isinstance(url, str):
+            return False
+        clean = url.strip().lower()
+        if not (clean.startswith("http://") or clean.startswith("https://")):
+            return False
+        # 拦截回环地址、常见云厂商元数据端点与私有局域网网段
+        blocked_hosts = [
+            "127.0.0.1", "localhost", "0.0.0.0", "::1",
+            "169.254.", "metadata.google", "metadata.tencent",
+            "100.100.100.200", "10.", "192.168.",
+            "172.16.", "172.17.", "172.18.", "172.19.", "172.20.",
+            "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
+            "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31."
+        ]
+        if any(b in clean for b in blocked_hosts):
+            logger.warning("自定义 LLM URL 命中安全策略拦截(禁止本地/内网/元数据地址): %s", url)
+            return False
+        return True
+
     async def generate_lively_comment(
         self,
         display_name: str,
@@ -99,9 +131,9 @@ class SlackerEngine:
         custom_llm_key: str = "",
         custom_llm_model: str = "gpt-3.5-turbo",
     ) -> str:
-        """生成贴合人设、自然灵动的摸鱼分享吐槽（支持可选自定义 LLM 端点或高质拟真文案库）"""
-        # 1. 若用户在配置中提供了自定义 LLM 端点与 Key，通过外部大模型动态生成
-        if custom_llm_url and custom_llm_key:
+        """生成贴合人设、自然灵动的摸鱼分享吐槽（支持可选自定义安全公网 LLM 端点或高质拟真文案库）"""
+        # 1. 若用户在配置中提供了安全合规的公网 LLM 端点与 Key，通过外部大模型动态生成
+        if custom_llm_url and custom_llm_key and self._is_safe_custom_url(custom_llm_url):
             topics_ctx = f"（同时出现的其他话题：{', '.join(related_topics)}）" if related_topics else ""
             prompt = (
                 f"你是小蓝，一个真实、温和随性爱玩单机游戏的年轻女生。刚才你在手机【{display_name}】刷到了一个热门内容："
@@ -184,14 +216,28 @@ class SlackerEngine:
 
             logger.info("麦麦开始摸鱼啦，正在启动: %s", display_name)
             await self.adb.open_app(target_pkg)
-            # 等待应用冷启动与开屏广告加载
-            await asyncio.sleep(3.0)
+            # 等待应用冷启动并尝试自动跳过开屏广告
+            await asyncio.sleep(1.5)
+            await self.dismiss_splash_ad()
+            await asyncio.sleep(1.5)
 
             # 3. 循环摸鱼浏览
             start_time = time.time()
             swipe_count = 0
 
             while time.time() - start_time < duration_seconds:
+                # 防误触广告跳转：如果意外跳出了目标应用，自动按返回键拉回前台
+                fg_st = await self.adb.get_status()
+                fg_pkg = fg_st.get("foreground_package", "")
+                if fg_pkg and fg_pkg != "unknown" and fg_pkg != target_pkg:
+                    logger.warning("检测到偏离目标应用 (%s -> %s)，自动按返回键回退", target_pkg, fg_pkg)
+                    await self.adb.press_key("back")
+                    await asyncio.sleep(1.0)
+                    fg_st2 = await self.adb.get_status()
+                    if fg_st2.get("foreground_package") != target_pkg:
+                        await self.adb.open_app(target_pkg)
+                        await asyncio.sleep(1.5)
+
                 # 模拟真人滑动
                 await self.human_swipe(direction="up")
                 swipe_count += 1

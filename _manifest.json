@@ -33,8 +33,7 @@
   },
   "capabilities": [
     "send.text",
-    "send.image",
-    "config.get"
+    "send.image"
   ],
   "i18n": {
     "default_locale": "zh-CN",

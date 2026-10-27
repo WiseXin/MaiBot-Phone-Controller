@@ -203,8 +203,56 @@ class PhoneControllerPlugin(MaiBotPlugin):
     # 安全防御辅助
     # -------------------------------------------------------------------------
 
-    def _check_owner_auth(self, user_id: Any, stream_id: Optional[str] = None) -> Tuple[bool, str]:
+    def _extract_user_id(self, kwargs: Dict[str, Any]) -> str:
+        """多级健壮提取调用者用户 ID (兼顾顶层注入、message 结构体与平台差异)"""
+        # 1. 优先顶层注入的 user_id / sender_id
+        uid = str(kwargs.get("user_id") or kwargs.get("sender_id") or "").strip()
+        if uid:
+            return uid
+
+        # 2. 从 message 字典或对象中深度解析
+        msg = kwargs.get("message")
+        if isinstance(msg, dict):
+            # 常见格式: message["user_info"]["user_id"] 或 message["sender"]["user_id"]
+            user_info = msg.get("user_info") or msg.get("sender") or msg.get("author") or {}
+            if isinstance(user_info, dict):
+                uid = str(user_info.get("user_id") or user_info.get("id") or "").strip()
+                if uid:
+                    return uid
+            uid = str(msg.get("user_id") or msg.get("sender_id") or "").strip()
+            if uid:
+                return uid
+        elif msg is not None:
+            user_info = getattr(msg, "user_info", None) or getattr(msg, "sender", None) or getattr(msg, "author", None)
+            if user_info is not None:
+                uid = str(getattr(user_info, "user_id", "") or getattr(user_info, "id", "") or "").strip()
+                if uid:
+                    return uid
+            uid = str(getattr(msg, "user_id", "") or "").strip()
+            if uid:
+                return uid
+
+        return ""
+
+    def _check_owner_auth(self, *args, **kwargs) -> Tuple[bool, str]:
         """检查调用者是否为主人，防止他人误触或滥用"""
+        passed_uid = ""
+        stream_id = ""
+        merged_kwargs = dict(kwargs)
+        if len(args) >= 1:
+            if isinstance(args[0], dict):
+                merged_kwargs.update(args[0])
+            else:
+                passed_uid = str(args[0] or "").strip()
+        if len(args) >= 2:
+            stream_id = str(args[1] or "").strip()
+
+        if not stream_id:
+            stream_id = str(merged_kwargs.get("stream_id") or "").strip()
+
+        # 健壮提取调用者 ID：优先显式参数，兜底多级消息体结构提取
+        caller_user_id = passed_uid or self._extract_user_id(merged_kwargs)
+
         try:
             cfg: PhoneControllerConfig = self.config
             raw_owner = str(cfg.device.owner_qq).strip() if cfg else ""
@@ -221,8 +269,15 @@ class PhoneControllerPlugin(MaiBotPlugin):
 
         # 支持英文逗号分隔的多主人配置
         owners = [x.strip() for x in raw_owner.split(",") if x.strip()]
-        if not owners or str(user_id).strip() in owners:
-            if stream_id:
+        if not owners or (caller_user_id and caller_user_id in owners):
+            # 仅在非群聊或明确是主人私聊流时记录为兜底摸鱼通知流，绝不对公聊群推送
+            is_group = bool(
+                merged_kwargs.get("group_id")
+                or "group" in stream_id.lower()
+                or "guild" in stream_id.lower()
+                or "channel" in stream_id.lower()
+            )
+            if stream_id and not is_group:
                 self._last_owner_stream_id = stream_id
             return True, ""
 
@@ -286,7 +341,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         parameters=[],
     )
     async def handle_phone_status(self, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs)
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -299,7 +354,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         parameters=[],
     )
     async def handle_phone_devices(self, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs)
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -341,7 +396,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         ],
     )
     async def handle_phone_connect(self, target: str, port: Optional[int] = None, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs)
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -371,7 +426,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         ],
     )
     async def handle_phone_pair(self, host: str, port: int, code: str, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs)
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -395,7 +450,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         ],
     )
     async def handle_phone_screenshot(self, send_to_chat: bool = True, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs)
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -407,11 +462,13 @@ class PhoneControllerPlugin(MaiBotPlugin):
         if not ok:
             return {"success": False, "message": f"截图失败: {res}"}
 
-        # 自动发送到当前聊天流
+        # 自动发送到当前聊天流（转换为合规 Base64 字符串出站）
         stream_id = kwargs.get("stream_id")
         if send_to_chat and stream_id and cfg.device.auto_send_screenshot:
             try:
-                await self.ctx.send.image(save_path, stream_id)
+                with open(save_path, "rb") as f:
+                    img_b64 = base64.b64encode(f.read()).decode("utf-8")
+                await self.ctx.send.image(img_b64, stream_id)
             except Exception as e:
                 logger.warning("截图发送至聊天失败: %s", e)
 
@@ -423,7 +480,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         parameters=[],
     )
     async def handle_phone_dump(self, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs)
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -456,7 +513,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         ],
     )
     async def handle_phone_tap_text(self, text: str, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs)
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -472,7 +529,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         ],
     )
     async def handle_phone_tap(self, x: int, y: int, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs)
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -504,7 +561,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         y2: Optional[int] = None,
         **kwargs,
     ) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs)
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -525,7 +582,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         ],
     )
     async def handle_phone_text(self, text: str, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs)
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -545,7 +602,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         ],
     )
     async def handle_phone_key(self, key: str, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs)
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -560,7 +617,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         ],
     )
     async def handle_phone_open_app(self, app: str, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs)
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -589,7 +646,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         ],
     )
     async def handle_phone_macro(self, actions_json: str, repeat: int = 1, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs)
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -638,7 +695,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         share_to_chat: bool = True,
         **kwargs,
     ) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs)
         if not auth_ok:
             return {"success": False, "message": msg}
 
