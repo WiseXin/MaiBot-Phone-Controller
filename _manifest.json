@@ -3,17 +3,17 @@
   "id": "deepseek-v4-pro.phone-controller",
   "version": "1.0.0",
   "name": "手机管家（Phone Controller）",
-  "description": "基于 ADB 的安卓手机控制插件，让麦麦具备看屏幕、截图、按文字智能点击、滑动、输文字、连招宏、录屏抽帧与空间/音乐联动能力",
+  "description": "基于 ADB 的安卓手机控制插件，让麦麦具备无线连接、看屏幕、截图、按文字智能点击、滑动、输文字与连招宏能力",
   "author": {
-    "name": "老大",
-    "url": "https://github.com/MaiM-with-u"
+    "name": "WiseXin",
+    "url": "https://github.com/WiseXin"
   },
   "license": "MIT",
   "urls": {
-    "repository": "https://github.com/MaiM-with-u/MaiBot",
-    "homepage": "https://github.com/MaiM-with-u/MaiBot",
-    "documentation": "https://github.com/MaiM-with-u/MaiBot#readme",
-    "issues": "https://github.com/MaiM-with-u/MaiBot/issues"
+    "repository": "https://github.com/WiseXin/MaiBot-Phone-Controller",
+    "homepage": "https://github.com/WiseXin/MaiBot-Phone-Controller",
+    "documentation": "https://github.com/WiseXin/MaiBot-Phone-Controller#readme",
+    "issues": "https://github.com/WiseXin/MaiBot-Phone-Controller/issues"
   },
   "host_application": {
     "min_version": "1.3.0",

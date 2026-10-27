@@ -1,12 +1,9 @@
 """phone_controller 插件主入口
 
-让麦麦具备控制受控安卓手机的全功能组件库：
+麦麦安卓手机控制核心组件库：
 1. 核心设备状态与无线连接 (phone_status, phone_connect, phone_pair)
 2. 视觉感知与 UI 分析 (phone_screenshot, phone_dump)
-3. 交互动作 (phone_tap_text, phone_tap, phone_swipe, phone_text, phone_key, phone_open_app, phone_macro)
-4. 动态录屏与抽帧 (phone_record_screen)
-5. 网易云音乐联动 (music_lyrics, music_search, music_control, music_room_say)
-6. QQ 空间互动 (qzone_post_feed, qzone_like_feed, qzone_get_feeds)
+3. 基础交互动作 (phone_tap_text, phone_tap, phone_swipe, phone_text, phone_key, phone_open_app, phone_macro)
 """
 
 from __future__ import annotations
@@ -16,50 +13,38 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from maibot_sdk import MaiBotPlugin, Tool
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from .adb_engine import AdbEngine
 from .config import PhoneControllerConfig
-from .music import MusicClient
-from .qzone import QzoneClient
-from .recorder import ScreenRecorder
 
 logger = logging.getLogger("plugin.phone_controller")
 
 
 class PhoneControllerPlugin(MaiBotPlugin):
-    """手机管家插件实现类"""
+    """手机管家核心插件实现类"""
 
     config_model = PhoneControllerConfig
 
     def __init__(self):
         super().__init__()
         self.adb: Optional[AdbEngine] = None
-        self.recorder: Optional[ScreenRecorder] = None
-        self.music: Optional[MusicClient] = None
-        self.qzone: Optional[QzoneClient] = None
 
     async def on_load(self) -> None:
         """插件加载初始化"""
         cfg: PhoneControllerConfig = self.config
         logger.info("正在加载手机管家插件: v%s", cfg.plugin.version)
 
-        # 1. 初始化底层引擎
+        # 初始化 ADB 控制引擎
         self.adb = AdbEngine(
             adb_path=cfg.device.adb_path,
             device_serial=cfg.device.device_serial,
         )
-        self.recorder = ScreenRecorder(adb=self.adb)
-        self.music = MusicClient(adb=self.adb, package_name=cfg.music.package_name)
-        self.qzone = QzoneClient(
-            base_url=cfg.qzone.napcat_http_url,
-            token=cfg.qzone.napcat_access_token,
-        )
 
-        # 2. 若配置了默认无线连接 IP 和端口，尝试自动静默连接
+        # 若配置了默认无线连接 IP 和端口，尝试自动静默连接
         if cfg.device.default_host and not cfg.device.device_serial:
             logger.info("尝试自动连接受控手机: %s:%s", cfg.device.default_host, cfg.device.default_port)
             asyncio.create_task(self.adb.connect(cfg.device.default_host, cfg.device.default_port))
@@ -77,11 +62,6 @@ class PhoneControllerPlugin(MaiBotPlugin):
             if self.adb:
                 self.adb.adb_path = cfg.device.adb_path
                 self.adb.set_device(cfg.device.device_serial)
-            if self.music:
-                self.music.package_name = cfg.music.package_name
-            if self.qzone:
-                self.qzone.base_url = cfg.qzone.napcat_http_url
-                self.qzone.token = cfg.qzone.napcat_access_token
             logger.info("手机管家配置热更新成功 (v%s)", version)
 
     # -------------------------------------------------------------------------
@@ -89,7 +69,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
     # -------------------------------------------------------------------------
 
     def _check_owner_auth(self, user_id: Any) -> Tuple[bool, str]:
-        """检查调用者是否为主人 QQ，防止群友误触或滥用"""
+        """检查调用者是否为主人 QQ，防止他人误触或滥用"""
         cfg: PhoneControllerConfig = self.config
         owner = str(cfg.device.owner_qq).strip()
         if not owner:
@@ -229,7 +209,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         }
 
     # -------------------------------------------------------------------------
-    # 3. 基础操作与智能点击
+    # 3. 基础交互操作与智能点击
     # -------------------------------------------------------------------------
 
     @Tool(
@@ -391,186 +371,6 @@ class PhoneControllerPlugin(MaiBotPlugin):
 
         ok, logs = await self.adb.execute_macro(actions, repeat=repeat)
         return {"success": ok, "logs": logs}
-
-    # -------------------------------------------------------------------------
-    # 4. 录屏感知与抽帧
-    # -------------------------------------------------------------------------
-
-    @Tool(
-        "phone_record_screen",
-        description="录制手机屏幕指定秒数的动态操作，并自动抽帧成多张关键帧图片发送到当前会话供查看。",
-        parameters=[
-            ToolParameterInfo(
-                name="seconds",
-                param_type=ToolParamType.INTEGER,
-                description="录屏秒数 (3~15 秒，默认 5 秒)",
-                required=False,
-            ),
-            ToolParameterInfo(
-                name="frames",
-                param_type=ToolParamType.INTEGER,
-                description="抽取的关键帧数量 (2~6 张，默认 4 张)",
-                required=False,
-            ),
-        ],
-    )
-    async def handle_phone_record_screen(self, seconds: int = 5, frames: int = 4, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"))
-        if not auth_ok:
-            return {"success": False, "message": msg}
-
-        cfg: PhoneControllerConfig = self.config
-        if not cfg.screen_record.enabled:
-            return {"success": False, "message": "录屏功能已被管理员禁用"}
-
-        out_dir = os.path.join(self._get_runtime_dir(), f"rec_{int(time.time())}")
-        ok, frame_paths, err = await self.recorder.record_and_extract_frames(
-            duration_seconds=seconds,
-            frame_count=frames,
-            output_dir=out_dir,
-        )
-
-        if not ok:
-            return {"success": False, "message": err}
-
-        # 自动发送关键帧到聊天
-        stream_id = kwargs.get("stream_id")
-        if stream_id and cfg.screen_record.auto_send_frames:
-            for p in frame_paths:
-                try:
-                    await self.ctx.send.image(p, stream_id)
-                    await asyncio.sleep(0.3)
-                except Exception as e:
-                    logger.warning("关键帧发送失败: %s", e)
-
-        return {
-            "success": True,
-            "message": f"录屏完成，已提取 {len(frame_paths)} 张关键帧",
-            "frame_paths": frame_paths,
-        }
-
-    # -------------------------------------------------------------------------
-    # 5. 网易云音乐联动
-    # -------------------------------------------------------------------------
-
-    @Tool(
-        "music_lyrics",
-        description="查询指定歌曲的歌词内容（支持歌名直接查询）。",
-        parameters=[
-            ToolParameterInfo(name="song_name", param_type=ToolParamType.STRING, description="歌曲名或搜索词", required=True),
-        ],
-    )
-    async def handle_music_lyrics(self, song_name: str, **kwargs) -> Dict[str, Any]:
-        ok, songs, err = await self.music.search_song(song_name, limit=1)
-        if not ok or not songs:
-            return {"success": False, "message": f"未搜索到歌曲 '{song_name}': {err}"}
-
-        song_id = songs[0]["id"]
-        title = f"{songs[0]['name']} - {songs[0]['artist']}"
-        ok, lyrics, err = await self.music.get_lyrics(song_id)
-        if not ok:
-            return {"success": False, "message": err}
-
-        return {"success": True, "song": title, "lyrics": lyrics[:1500]}
-
-    @Tool(
-        "music_control",
-        description="控制手机网易云音乐播放：'play_pause'(播放/暂停), 'next'(下一首), 'prev'(上一首)。",
-        parameters=[
-            ToolParameterInfo(
-                name="action",
-                param_type=ToolParamType.STRING,
-                description="动作类型: 'play_pause' (播放/暂停), 'next' (下一首), 'prev' (上一首)",
-                required=True,
-            ),
-        ],
-    )
-    async def handle_music_control(self, action: str, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"))
-        if not auth_ok:
-            return {"success": False, "message": msg}
-
-        ok, res = await self.music.control_playback(action)
-        return {"success": ok, "message": res}
-
-    @Tool(
-        "music_room_say",
-        description="在手机网易云音乐「一起听」聊天室发言交流。",
-        parameters=[
-            ToolParameterInfo(name="text", param_type=ToolParamType.STRING, description="在聊天室发送的文本内容", required=True),
-        ],
-    )
-    async def handle_music_room_say(self, text: str, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"))
-        if not auth_ok:
-            return {"success": False, "message": msg}
-
-        ok, res = await self.music.room_say(text)
-        return {"success": ok, "message": res}
-
-    # -------------------------------------------------------------------------
-    # 6. QQ 空间互动
-    # -------------------------------------------------------------------------
-
-    @Tool(
-        "qzone_post_feed",
-        description="在 QQ 空间发布一条新说说（由受控或中继账号发布）。",
-        parameters=[
-            ToolParameterInfo(name="content", param_type=ToolParamType.STRING, description="说说的文本内容", required=True),
-        ],
-    )
-    async def handle_qzone_post_feed(self, content: str, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"))
-        if not auth_ok:
-            return {"success": False, "message": msg}
-
-        cfg: PhoneControllerConfig = self.config
-        if not cfg.qzone.enabled:
-            return {"success": False, "message": "QQ空间功能未启用"}
-
-        ok, res = await self.qzone.publish_feed(content, max_daily=cfg.qzone.daily_post_limit)
-        return {"success": ok, "message": res}
-
-    @Tool(
-        "qzone_like_feed",
-        description="为指定的 QQ 空间说说点赞。",
-        parameters=[
-            ToolParameterInfo(name="feed_id", param_type=ToolParamType.STRING, description="说说的 ID (tid)", required=False),
-            ToolParameterInfo(name="user_id", param_type=ToolParamType.STRING, description="被点赞用户 QQ 号", required=False),
-        ],
-    )
-    async def handle_qzone_like_feed(self, feed_id: str = "", user_id: str = "", **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"))
-        if not auth_ok:
-            return {"success": False, "message": msg}
-
-        cfg: PhoneControllerConfig = self.config
-        if not cfg.qzone.enabled:
-            return {"success": False, "message": "QQ空间功能未启用"}
-
-        ok, res = await self.qzone.like_feed(feed_id=feed_id, user_id=user_id)
-        return {"success": ok, "message": res}
-
-    @Tool(
-        "qzone_get_feeds",
-        description="获取好友 QQ 空间的最新动态列表。",
-        parameters=[
-            ToolParameterInfo(name="count", param_type=ToolParamType.INTEGER, description="获取条数 (默认 5 条)", required=False),
-        ],
-    )
-    async def handle_qzone_get_feeds(self, count: int = 5, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"))
-        if not auth_ok:
-            return {"success": False, "message": msg}
-
-        cfg: PhoneControllerConfig = self.config
-        if not cfg.qzone.enabled:
-            return {"success": False, "message": "QQ空间功能未启用"}
-
-        ok, feeds, err = await self.qzone.get_feeds(count=count)
-        if not ok:
-            return {"success": False, "message": err}
-        return {"success": True, "feeds": feeds[:count]}
 
 
 def create_plugin() -> MaiBotPlugin:
