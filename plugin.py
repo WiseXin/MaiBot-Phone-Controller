@@ -205,33 +205,55 @@ class PhoneControllerPlugin(MaiBotPlugin):
 
     def _extract_user_id(self, kwargs: Dict[str, Any]) -> str:
         """多级健壮提取调用者用户 ID (兼顾顶层注入、message 结构体与平台差异)"""
-        # 1. 优先顶层注入的 user_id / sender_id
-        uid = str(kwargs.get("user_id") or kwargs.get("sender_id") or "").strip()
+        # 1. 优先顶层注入的 user_id / sender_id / author_id
+        uid = str(
+            kwargs.get("user_id")
+            or kwargs.get("sender_id")
+            or kwargs.get("author_id")
+            or kwargs.get("from_user_id")
+            or ""
+        ).strip()
         if uid:
             return uid
 
         # 2. 从 message 字典或对象中深度解析
         msg = kwargs.get("message")
         if isinstance(msg, dict):
-            # 常见格式: message["user_info"]["user_id"] 或 message["sender"]["user_id"]
-            user_info = msg.get("user_info") or msg.get("sender") or msg.get("author") or {}
+            # 兼容格式: message["user_info"]["user_id"], message["sender"]["user_id"], message["author"]["id"] 等
+            user_info = (
+                msg.get("user_info")
+                or msg.get("sender")
+                or msg.get("author")
+                or msg.get("from_user")
+                or {}
+            )
             if isinstance(user_info, dict):
                 uid = str(user_info.get("user_id") or user_info.get("id") or "").strip()
                 if uid:
                     return uid
-            uid = str(msg.get("user_id") or msg.get("sender_id") or "").strip()
+            uid = str(msg.get("user_id") or msg.get("sender_id") or msg.get("author_id") or "").strip()
             if uid:
                 return uid
         elif msg is not None:
-            user_info = getattr(msg, "user_info", None) or getattr(msg, "sender", None) or getattr(msg, "author", None)
+            user_info = (
+                getattr(msg, "user_info", None)
+                or getattr(msg, "sender", None)
+                or getattr(msg, "author", None)
+                or getattr(msg, "from_user", None)
+            )
             if user_info is not None:
                 uid = str(getattr(user_info, "user_id", "") or getattr(user_info, "id", "") or "").strip()
                 if uid:
                     return uid
-            uid = str(getattr(msg, "user_id", "") or "").strip()
+            uid = str(getattr(msg, "user_id", "") or getattr(msg, "sender_id", "") or "").strip()
             if uid:
                 return uid
 
+        logger.warning(
+            "【手机管家鉴权】未能从工具上下文中解析出调用者 ID，请求将被安全拦截。kwargs keys: %s, message 结构: %s",
+            list(kwargs.keys()),
+            repr(msg)[:200] if msg else "无",
+        )
         return ""
 
     def _check_owner_auth(self, *args, **kwargs) -> Tuple[bool, str]:
@@ -259,7 +281,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         except Exception:
             raw_owner = ""
 
-        # 【核心安全防线】未配置主人时，默认拒绝一切控制指令，防止在群聊中被任意调用泄露手机隐私
+        # 【核心安全防线】未配置主人或仅填入分隔符时，默认拒绝一切控制指令，防止在群聊中被任意调用泄露手机隐私
         if not raw_owner:
             return False, (
                 "【安全拦截】手机管家插件尚未配置主人账号（device.owner_qq）。"
@@ -267,9 +289,17 @@ class PhoneControllerPlugin(MaiBotPlugin):
                 "请管理员先在插件配置中填入主人 QQ 号或 Discord 用户 ID 后再使用。"
             )
 
-        # 支持英文逗号分隔的多主人配置
-        owners = [x.strip() for x in raw_owner.split(",") if x.strip()]
-        if not owners or (caller_user_id and caller_user_id in owners):
+        # 支持英文逗号与中文逗号分隔的多主人配置
+        owners = [x.strip() for x in raw_owner.replace("，", ",").split(",") if x.strip()]
+        if not owners:
+            return False, (
+                "【安全拦截】手机管家插件尚未配置有效的主人账号（device.owner_qq 为空或仅包含分隔符）。"
+                "为防止群聊成员恶意操控你的手机或泄露隐私，默认拒绝所有指令。"
+                "请管理员先在插件配置中填入主人 QQ 号或 Discord 用户 ID 后再使用。"
+            )
+
+        # 严格白名单匹配：调用者 ID 必须明确在主人列表中，绝不放行空列表或未知用户 (fail-closed)
+        if caller_user_id and caller_user_id in owners:
             # 仅在非群聊或明确是主人私聊流时记录为兜底摸鱼通知流，绝不对公聊群推送
             is_group = bool(
                 merged_kwargs.get("group_id")
