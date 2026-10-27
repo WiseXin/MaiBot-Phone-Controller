@@ -16,6 +16,7 @@ import io
 import logging
 import os
 import re
+import shutil
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional, Tuple
 from PIL import Image
@@ -64,9 +65,32 @@ KEY_MAP: Dict[str, int] = {
 class AdbEngine:
     """异步 ADB 命令执行与交互控制引擎"""
 
-    def __init__(self, adb_path: str = "/usr/bin/adb", device_serial: str = ""):
-        self.adb_path = adb_path
+    def __init__(self, adb_path: str = "adb", device_serial: str = ""):
+        self.adb_path = self._resolve_adb_path(adb_path)
         self.device_serial = device_serial.strip()
+
+    @staticmethod
+    def _resolve_adb_path(configured_path: str) -> str:
+        """智能寻找可执行的 ADB 二进制路径，支持各平台开箱即用"""
+        if configured_path and os.path.isabs(configured_path) and os.path.exists(configured_path):
+            return configured_path
+        
+        # 优先在系统 PATH 查找
+        found = shutil.which(configured_path) or shutil.which("adb")
+        if found:
+            return found
+
+        # 常见 Linux / macOS / Windows 默认安装路径探测
+        candidates = [
+            "/usr/bin/adb",
+            "/usr/local/bin/adb",
+            "/opt/homebrew/bin/adb",
+            r"C:\platform-tools\adb.exe",
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                return c
+        return configured_path or "adb"
 
     def set_device(self, serial: str) -> None:
         """动态设置当前操作的设备序列号/IP:端口"""
@@ -362,45 +386,48 @@ class AdbEngine:
 
     async def input_text(self, text: str) -> Tuple[bool, str]:
         """
-        向当前焦点输入框打字。
-        若包含非 ASCII 字符（中文等），优先调用 ADBKeyboard 输入法广播：
-        adb shell am broadcast -a ADB_INPUT_B64 --es msg <base64>
+        向当前焦点输入框输入文本。
+        一律采用 ADBKeyboard Base64 广播协议传输，彻底避免 shell 注入和特殊字符转义错误。
         """
-        has_non_ascii = any(ord(c) > 127 for c in text)
-
-        if not has_non_ascii:
-            # 纯英文数字走原生 input text（转义空格和特殊符号）
-            safe_text = text.replace(" ", "%s").replace("'", "\\'").replace('"', '\\"')
-            ok, err = await self.run_shell(f"input text '{safe_text}'")
-            return ok, f"已输入文本: {text}" if ok else err
-
-        # 中文/复杂字符走 ADBKeyboard Base64 广播
         b64_str = base64.b64encode(text.encode("utf-8")).decode("utf-8")
-        ok, out = await self.run_shell(f"am broadcast -a ADB_INPUT_B64 --es msg '{b64_str}'")
-        if ok and "result=0" in out:
-            return True, f"已通过 ADBKeyboard 输入中文: {text}"
-        elif "Broadcast completed" in out:
-            return True, f"已发送输入广播: {text}"
-        else:
-            # 降级提示
-            return False, f"输入失败，手机端可能未安装或未启用 ADBKeyboard 输入法: {out}"
+        ok, out = await self.run_shell(f"am broadcast -a ADB_INPUT_B64 --es msg {b64_str}")
+        if ok and ("result=0" in out or "Broadcast completed" in out):
+            return True, f"已输入文本: {text}"
+
+        # 若未启用 ADBKeyboard，安全过滤后回退到原生 input text
+        safe_chars = re.sub(r"[^a-zA-Z0-9_ -]", "", text)
+        if safe_chars:
+            safe_text = safe_chars.replace(" ", "%s")
+            ok2, err2 = await self.run_shell(f"input text {safe_text}")
+            if ok2:
+                return True, f"已通过基础输入法输入: {safe_chars} (建议手机端启用 ADBKeyboard 支持全字符输入)"
+
+        return False, f"输入失败，手机端请安装并启用 ADBKeyboard 输入法: {out}"
 
     async def open_app(self, app_name_or_pkg: str) -> Tuple[bool, str]:
         """通过常用名或包名启动 App"""
         target = app_name_or_pkg.strip().lower()
         pkg = APP_PACKAGE_MAP.get(target, app_name_or_pkg.strip())
 
+        # 严格包名校验，杜绝 shell 注入风险
+        if not re.match(r"^[a-zA-Z0-9_.]+$", pkg):
+            return False, f"非法包名或应用标识: {app_name_or_pkg}"
+
         # 优先使用 monkey 工具快速调起包名启动入口
         ok, out = await self.run_shell(f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1")
         if ok and "No activities found" not in out:
             return True, f"成功启动应用: {app_name_or_pkg} ({pkg})"
 
-        # 兜底方式 am start
-        ok, out = await self.run_shell(f"am start -n $(cmd package resolve-activity --brief {pkg} | tail -n 1)")
-        if ok and "Error" not in out:
-            return True, f"已拉起应用: {app_name_or_pkg} ({pkg})"
+        # 兜底方式：在 Python 侧解析真实入口，避免 shell 嵌套注入
+        ok_res, out_res = await self.run_shell(f"cmd package resolve-activity --brief {pkg}")
+        if ok_res and "/" in out_res:
+            activity = out_res.strip().splitlines()[-1].strip()
+            if re.match(r"^[a-zA-Z0-9_./$]+$", activity):
+                ok_start, out_start = await self.run_shell(f"am start -n {activity}")
+                if ok_start and "Error" not in out_start:
+                    return True, f"已拉起应用: {app_name_or_pkg} ({activity})"
 
-        return False, f"无法启动应用 {app_name_or_pkg}: {out}"
+        return False, f"无法启动应用 {app_name_or_pkg}: 未找到有效启动入口"
 
     # -------------------------------------------------------------------------
     # 4. 连招宏执行引擎 (Macro)

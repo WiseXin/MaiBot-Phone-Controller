@@ -9,9 +9,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
+import random
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -20,6 +23,7 @@ from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from .adb_engine import AdbEngine
 from .config import PhoneControllerConfig
+from .slacker import SlackerEngine
 
 logger = logging.getLogger("plugin.phone_controller")
 
@@ -32,27 +36,35 @@ class PhoneControllerPlugin(MaiBotPlugin):
     def __init__(self):
         super().__init__()
         self.adb: Optional[AdbEngine] = None
+        self.slacker: Optional[SlackerEngine] = None
+        self._auto_slack_task: Optional[asyncio.Task] = None
+        self._last_owner_stream_id: str = ""
 
     async def on_load(self) -> None:
         """插件加载初始化"""
         cfg: PhoneControllerConfig = self.config
         logger.info("正在加载手机管家插件: v%s", cfg.plugin.version)
 
-        # 初始化 ADB 控制引擎
+        # 初始化 ADB 控制引擎与自主摸鱼引擎
         self.adb = AdbEngine(
             adb_path=cfg.device.adb_path,
             device_serial=cfg.device.device_serial,
         )
+        self.slacker = SlackerEngine(self.adb, runtime_dir=self._get_runtime_dir())
 
         # 若配置了默认无线连接 IP 和端口，尝试自动静默连接
         if cfg.device.default_host and not cfg.device.device_serial:
             logger.info("尝试自动连接受控手机: %s:%s", cfg.device.default_host, cfg.device.default_port)
             asyncio.create_task(self.adb.connect(cfg.device.default_host, cfg.device.default_port))
 
+        # 启动闲时自动摸鱼巡航调度器 (若开启)
+        self._start_auto_slacker()
+
         logger.info("手机管家插件加载完成")
 
     async def on_unload(self) -> None:
         """插件卸载清理"""
+        self._stop_auto_slacker()
         logger.info("手机管家插件已卸载")
 
     async def on_config_update(self, scope: str, config_data: dict, version: str) -> None:
@@ -62,21 +74,159 @@ class PhoneControllerPlugin(MaiBotPlugin):
             if self.adb:
                 self.adb.adb_path = cfg.device.adb_path
                 self.adb.set_device(cfg.device.device_serial)
+            if self.slacker:
+                self.slacker.runtime_dir = self._get_runtime_dir()
+            # 重启摸鱼调度器以应用最新作息与间隔配置
+            self._start_auto_slacker()
             logger.info("手机管家配置热更新成功 (v%s)", version)
+
+    # -------------------------------------------------------------------------
+    # 闲时自动摸鱼巡航调度器 (数字生命模式)
+    # -------------------------------------------------------------------------
+
+    def _start_auto_slacker(self) -> None:
+        """启动或重载自动摸鱼调度任务"""
+        self._stop_auto_slacker()
+        try:
+            cfg: PhoneControllerConfig = self.config
+            if cfg.slack_off.enabled and cfg.slack_off.auto_slacking:
+                logger.info("【数字生命】已激活闲时自主摸鱼巡航服务，作息窗口: %s", cfg.slack_off.active_time_range)
+                self._auto_slack_task = asyncio.create_task(self._auto_slacking_loop())
+        except Exception as e:
+            logger.warning("启动自动摸鱼调度器异常: %s", e)
+
+    def _stop_auto_slacker(self) -> None:
+        """停止自动摸鱼调度任务"""
+        if self._auto_slack_task and not self._auto_slack_task.done():
+            self._auto_slack_task.cancel()
+            self._auto_slack_task = None
+
+    def _is_in_active_hours(self, range_str: str) -> bool:
+        """根据北京时间 (UTC+8) 判断当前是否在设定的玩手机时间段内"""
+        try:
+            # 严格基于北京时间 (UTC+8) 计算
+            beijing_now = datetime.now(timezone(timedelta(hours=8)))
+            now_min = beijing_now.hour * 60 + beijing_now.minute
+
+            parts = range_str.strip().split("-")
+            if len(parts) != 2:
+                return True
+
+            s_h, s_m = map(int, parts[0].strip().split(":"))
+            e_h, e_m = map(int, parts[1].strip().split(":"))
+            start_min = s_h * 60 + s_m
+            end_min = e_h * 60 + e_m
+
+            if start_min <= end_min:
+                return start_min <= now_min <= end_min
+            else:
+                # 跨夜时段
+                return now_min >= start_min or now_min <= end_min
+        except Exception as e:
+            logger.warning("解析活跃时间范围异常: %s", e)
+            return True
+
+    async def _auto_slacking_loop(self) -> None:
+        """闲时自主摸鱼巡航主循环"""
+        logger.info("闲时自主摸鱼巡航协程已启动")
+        # 首次启动先随机缓冲 300 ~ 600 秒
+        await asyncio.sleep(random.randint(300, 600))
+
+        while True:
+            try:
+                cfg: PhoneControllerConfig = self.config
+                if not cfg.slack_off.enabled or not cfg.slack_off.auto_slacking:
+                    break
+
+                # 安全门禁：未配置主人账号时保持休眠，绝不对公网或未知群推送
+                if not cfg.device.owner_qq.strip():
+                    logger.debug("未配置主人账号，自动摸鱼巡航保持休眠")
+                    await asyncio.sleep(1800)
+                    continue
+
+                # 1. 计算下一次摸鱼随机间隔
+                min_sec = max(1800, int(cfg.slack_off.interval_hours_min * 3600))
+                max_sec = max(min_sec, int(cfg.slack_off.interval_hours_max * 3600))
+                sleep_sec = random.randint(min_sec, max_sec)
+
+                # 2. 检查作息时间与手机状态
+                if self._is_in_active_hours(cfg.slack_off.active_time_range):
+                    status = await self.adb.get_status()
+                    if status.get("connected"):
+                        apps = [x.strip() for x in cfg.slack_off.preferred_apps.split(",") if x.strip()]
+                        target_app = random.choice(apps) if apps else "b站"
+                        logger.info("【数字生命】麦麦闲来无事，自主拿起手机去刷【%s】啦！", target_app)
+
+                        target_stream = cfg.slack_off.notify_stream_id.strip() or self._last_owner_stream_id
+
+                        async def _auto_share(img_path: str, caption: str):
+                            if target_stream and cfg.slack_off.share_interesting_finds:
+                                try:
+                                    await self.ctx.send.text(caption, target_stream)
+                                    with open(img_path, "rb") as f:
+                                        img_b64 = base64.b64encode(f.read()).decode("utf-8")
+                                    await self.ctx.send.image(img_b64, target_stream)
+                                except Exception as err:
+                                    logger.warning("摸鱼主动出站消息发送失败: %s", err)
+
+                        # 执行自主摸鱼
+                        await self.slacker.run_slacking_session(
+                            app_name=target_app,
+                            duration_seconds=cfg.slack_off.session_duration_seconds,
+                            interval_min=cfg.slack_off.swipe_interval_min,
+                            interval_max=cfg.slack_off.swipe_interval_max,
+                            share_callback=_auto_share,
+                            custom_llm_url=cfg.slack_off.custom_llm_url,
+                            custom_llm_key=cfg.slack_off.custom_llm_key,
+                            custom_llm_model=cfg.slack_off.custom_llm_model,
+                        )
+
+                        # 摸鱼完毕自动灭屏锁屏
+                        if cfg.slack_off.lock_screen_after_slack:
+                            await asyncio.sleep(1.0)
+                            await self.adb.press_key("power")
+                    else:
+                        logger.debug("受控手机未连接，跳过本次自动摸鱼")
+                else:
+                    logger.debug("当前处于免打扰时段，麦麦正在安睡，不去玩手机")
+
+                await asyncio.sleep(sleep_sec)
+
+            except asyncio.CancelledError:
+                logger.info("自动摸鱼调度任务已正常停止")
+                break
+            except Exception as e:
+                logger.error("自动摸鱼循环异常: %s", e)
+                await asyncio.sleep(600)
 
     # -------------------------------------------------------------------------
     # 安全防御辅助
     # -------------------------------------------------------------------------
 
-    def _check_owner_auth(self, user_id: Any) -> Tuple[bool, str]:
-        """检查调用者是否为主人 QQ，防止他人误触或滥用"""
-        cfg: PhoneControllerConfig = self.config
-        owner = str(cfg.device.owner_qq).strip()
-        if not owner:
-            return True, ""  # 未配置主人则不限制
-        if str(user_id).strip() != owner:
-            return False, f"权限拦截：手机控制功能仅允许主人（QQ: {owner}）操作。"
-        return True, ""
+    def _check_owner_auth(self, user_id: Any, stream_id: Optional[str] = None) -> Tuple[bool, str]:
+        """检查调用者是否为主人，防止他人误触或滥用"""
+        try:
+            cfg: PhoneControllerConfig = self.config
+            raw_owner = str(cfg.device.owner_qq).strip() if cfg else ""
+        except Exception:
+            raw_owner = ""
+
+        # 【核心安全防线】未配置主人时，默认拒绝一切控制指令，防止在群聊中被任意调用泄露手机隐私
+        if not raw_owner:
+            return False, (
+                "【安全拦截】手机管家插件尚未配置主人账号（device.owner_qq）。"
+                "为防止群聊成员恶意操控你的手机或泄露隐私，默认拒绝所有指令。"
+                "请管理员先在插件配置中填入主人 QQ 号或 Discord 用户 ID 后再使用。"
+            )
+
+        # 支持英文逗号分隔的多主人配置
+        owners = [x.strip() for x in raw_owner.split(",") if x.strip()]
+        if not owners or str(user_id).strip() in owners:
+            if stream_id:
+                self._last_owner_stream_id = stream_id
+            return True, ""
+
+        return False, f"权限拦截：手机控制功能仅允许主人（ID: {raw_owner}）操作。"
 
     def _get_runtime_dir(self) -> str:
         """获取安全的运行时临时文件目录"""
@@ -86,6 +236,45 @@ class PhoneControllerPlugin(MaiBotPlugin):
             p = "/tmp/phone_controller"
             os.makedirs(p, exist_ok=True)
             return p
+
+    def _resolve_target(self, target: str, port: Optional[int] = None) -> Tuple[str, int, str]:
+        """解析设备别名（如'小米'、'vivo'）或 IP:端口"""
+        target_clean = target.strip().lower()
+        
+        # 用户配置别名
+        merged_aliases: Dict[str, str] = {}
+        try:
+            cfg: PhoneControllerConfig = self.config
+            if cfg and cfg.device.aliases:
+                if isinstance(cfg.device.aliases, dict):
+                    merged_aliases.update(cfg.device.aliases)
+                elif isinstance(cfg.device.aliases, str):
+                    for item in cfg.device.aliases.split(","):
+                        if "=" in item:
+                            k_part, v_part = item.split("=", 1)
+                            merged_aliases[k_part.strip()] = v_part.strip()
+        except Exception:
+            pass
+
+        # 1. 尝试匹配别名 (完全匹配或包含匹配)
+        matched_alias = ""
+        matched_addr = ""
+        for alias_key, addr in merged_aliases.items():
+            k = alias_key.lower().strip()
+            if target_clean == k or k in target_clean or target_clean in k:
+                matched_alias = alias_key
+                matched_addr = addr.strip()
+                break
+
+        final_addr = matched_addr if matched_addr else target.strip()
+        
+        # 2. 解析 host 与 port
+        if ":" in final_addr:
+            h, p_str = final_addr.split(":", 1)
+            p = int(p_str) if p_str.isdigit() else (port or 5555)
+            return h.strip(), p, matched_alias
+        
+        return final_addr, port or 5555, matched_alias
 
     # -------------------------------------------------------------------------
     # 1. 核心设备与连接工具
@@ -97,7 +286,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         parameters=[],
     )
     async def handle_phone_status(self, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -105,30 +294,72 @@ class PhoneControllerPlugin(MaiBotPlugin):
         return {"success": True, "data": status}
 
     @Tool(
+        "phone_devices",
+        description="查看当前所有可用的手机设备别名（如'小米'、'vivo'）以及当前已连接的目标设备。",
+        parameters=[],
+    )
+    async def handle_phone_devices(self, **kwargs) -> Dict[str, Any]:
+        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
+        if not auth_ok:
+            return {"success": False, "message": msg}
+
+        cfg: PhoneControllerConfig = self.config
+        aliases: Dict[str, str] = {}
+        if cfg and cfg.device.aliases:
+            if isinstance(cfg.device.aliases, dict):
+                aliases.update(cfg.device.aliases)
+            elif isinstance(cfg.device.aliases, str):
+                for item in cfg.device.aliases.split(","):
+                    if "=" in item:
+                        k_part, v_part = item.split("=", 1)
+                        aliases[k_part.strip()] = v_part.strip()
+
+        devs = await self.adb.list_devices()
+        return {
+            "success": True,
+            "current_active_device": self.adb.device_serial or "未指定(自动使用默认)",
+            "preset_aliases": aliases,
+            "online_adb_devices": devs,
+        }
+
+    @Tool(
         "phone_connect",
-        description="连接受控手机的无线调试端口 (IP:端口)。在手机重启或无线调试端口改变后使用此工具重连。",
+        description="连接或切换受控手机。支持直接传入设备别名（如'手机A'、'备用机'）或具体 IP/端口（如 192.168.1.100:5555 或 100.x.x.x:5555）。",
         parameters=[
             ToolParameterInfo(
-                name="host",
+                name="target",
                 param_type=ToolParamType.STRING,
-                description="手机的 IP 地址（如 Tailscale 100.x.x.x 或局域网 IP）",
+                description="设备别名（如'手机A'、'备用机'）或 IP 地址（如 192.168.1.100）或 IP:端口",
                 required=True,
             ),
             ToolParameterInfo(
                 name="port",
                 param_type=ToolParamType.INTEGER,
-                description="无线调试端口号",
+                description="可选，无线调试端口号（若 target 已含端口或为预设别名，可不填）",
                 required=False,
             ),
         ],
     )
-    async def handle_phone_connect(self, host: str, port: int = 5555, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"))
+    async def handle_phone_connect(self, target: str, port: Optional[int] = None, **kwargs) -> Dict[str, Any]:
+        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
         if not auth_ok:
             return {"success": False, "message": msg}
 
-        ok, out = await self.adb.connect(host, port)
-        return {"success": ok, "message": out}
+        host, final_port, alias_name = self._resolve_target(target, port)
+        ok, out = await self.adb.connect(host, final_port)
+        
+        prefix = f"【{alias_name}】" if alias_name else ""
+        if ok:
+            return {
+                "success": True,
+                "message": f"成功连接至{prefix}设备 ({host}:{final_port})",
+                "target": f"{host}:{final_port}",
+                "alias": alias_name,
+            }
+        return {
+            "success": False,
+            "message": f"连接{prefix}设备 ({host}:{final_port}) 失败: {out}",
+        }
 
     @Tool(
         "phone_pair",
@@ -140,7 +371,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         ],
     )
     async def handle_phone_pair(self, host: str, port: int, code: str, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -164,7 +395,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         ],
     )
     async def handle_phone_screenshot(self, send_to_chat: bool = True, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -192,7 +423,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         parameters=[],
     )
     async def handle_phone_dump(self, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -225,7 +456,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         ],
     )
     async def handle_phone_tap_text(self, text: str, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -241,7 +472,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         ],
     )
     async def handle_phone_tap(self, x: int, y: int, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -273,7 +504,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         y2: Optional[int] = None,
         **kwargs,
     ) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -294,7 +525,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         ],
     )
     async def handle_phone_text(self, text: str, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -314,7 +545,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         ],
     )
     async def handle_phone_key(self, key: str, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -329,7 +560,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         ],
     )
     async def handle_phone_open_app(self, app: str, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -358,7 +589,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
         ],
     )
     async def handle_phone_macro(self, actions_json: str, repeat: int = 1, **kwargs) -> Dict[str, Any]:
-        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"))
+        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
         if not auth_ok:
             return {"success": False, "message": msg}
 
@@ -371,6 +602,74 @@ class PhoneControllerPlugin(MaiBotPlugin):
 
         ok, logs = await self.adb.execute_macro(actions, repeat=repeat)
         return {"success": ok, "logs": logs}
+
+    # -------------------------------------------------------------------------
+    # 4. 拟人化自主摸鱼 (数字生命模式)
+    # -------------------------------------------------------------------------
+
+    @Tool(
+        "phone_slack_off",
+        description="【数字生命/自主摸鱼】让麦麦在受控手机上自主摸鱼刷内容（支持 B站/知乎/微博/小红书/网易云），模拟真人手势滑动与停顿阅读，刷到好玩内容时主动给主人发截图吐槽分享。",
+        parameters=[
+            ToolParameterInfo(
+                name="app",
+                param_type=ToolParamType.STRING,
+                description="想要摸鱼的应用，例如：'b站'、'知乎'、'微博'、'小红书'、'网易云'（默认'b站'）",
+                required=False,
+            ),
+            ToolParameterInfo(
+                name="duration_seconds",
+                param_type=ToolParamType.INTEGER,
+                description="本次摸鱼持续时长（秒），默认 60 秒，最长 300 秒",
+                required=False,
+            ),
+            ToolParameterInfo(
+                name="share_to_chat",
+                param_type=ToolParamType.BOOLEAN,
+                description="摸鱼时刷到好玩的内容是否自动发送截图和吐槽到当前聊天窗口（默认 True）",
+                required=False,
+            ),
+        ],
+    )
+    async def handle_phone_slack_off(
+        self,
+        app: str = "b站",
+        duration_seconds: int = 60,
+        share_to_chat: bool = True,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        auth_ok, msg = self._check_owner_auth(kwargs.get("user_id"), kwargs.get("stream_id"))
+        if not auth_ok:
+            return {"success": False, "message": msg}
+
+        cfg: PhoneControllerConfig = self.config
+        if not cfg.slack_off.enabled:
+            return {"success": False, "message": "自主摸鱼功能已在插件配置中关闭"}
+
+        duration = max(10, min(duration_seconds, 300))
+        stream_id = kwargs.get("stream_id")
+
+        async def _on_share(image_path: str, caption: str):
+            if share_to_chat and stream_id and cfg.slack_off.share_interesting_finds:
+                try:
+                    await self.ctx.send.text(caption, stream_id)
+                    with open(image_path, "rb") as f:
+                        img_b64 = base64.b64encode(f.read()).decode("utf-8")
+                    await self.ctx.send.image(img_b64, stream_id)
+                except Exception as e:
+                    logger.warning("摸鱼分享发送失败: %s", e)
+
+        res = await self.slacker.run_slacking_session(
+            app_name=app,
+            duration_seconds=duration,
+            interval_min=cfg.slack_off.swipe_interval_min,
+            interval_max=cfg.slack_off.swipe_interval_max,
+            share_callback=_on_share if share_to_chat else None,
+            custom_llm_url=cfg.slack_off.custom_llm_url,
+            custom_llm_key=cfg.slack_off.custom_llm_key,
+            custom_llm_model=cfg.slack_off.custom_llm_model,
+        )
+        return res
 
 
 def create_plugin() -> MaiBotPlugin:

@@ -1,0 +1,32 @@
+[plugin]
+name = "phone_controller"
+version = "1.1.0"
+config_version = "1.1.0"
+enabled = true
+
+[device]
+adb_path = "adb"
+device_serial = ""
+default_host = ""
+default_port = 5555
+owner_qq = "" # 【核心安全必填项】允许控制手机的主人账号 ID（如 QQ 号或 Discord 用户 ID，多个用逗号隔开）。留空将安全拦截所有控制命令以防滥用
+auto_send_screenshot = true
+screenshot_quality = 75
+aliases = "我的手机=192.168.1.100:5555" # 设备别名快捷映射表示例
+
+[slack_off]
+enabled = true
+auto_slacking = false # 自动摸鱼默认关闭，配置好 owner_qq 后按需开启
+interval_hours_min = 2.0
+interval_hours_max = 4.0
+session_duration_seconds = 60
+active_time_range = "09:00-23:00"
+lock_screen_after_slack = true
+preferred_apps = "b站,知乎,微博,小红书"
+share_interesting_finds = true
+swipe_interval_min = 3.0
+swipe_interval_max = 7.0
+notify_stream_id = "" # 留空会自动发送至主人最近一次聊天的私聊窗口
+custom_llm_url = "" # 可选：自定义 AI 总结吐槽端点（OpenAI 兼容接口，留空使用内置拟真文案库）
+custom_llm_key = "" # 可选：自定义 AI 总结吐槽 API 密钥
+custom_llm_model = "gpt-3.5-turbo"
