@@ -327,8 +327,12 @@ class AdbEngine:
 
     async def tap(self, x: int, y: int) -> Tuple[bool, str]:
         """模拟点击坐标 (x, y)"""
-        ok, err = await self.run_shell(f"input tap {x} {y}")
-        return ok, f"点击 ({x}, {y})" if ok else err
+        try:
+            ix, iy = int(x), int(y)
+        except (ValueError, TypeError):
+            return False, f"坐标参数必须为整数: x={x}, y={y}"
+        ok, err = await self.run_shell(f"input tap {ix} {iy}")
+        return ok, f"点击 ({ix}, {iy})" if ok else err
 
     async def tap_text(self, text: str) -> Tuple[bool, str]:
         """智能按界面上的文字寻找元素并点击"""
@@ -350,8 +354,13 @@ class AdbEngine:
         duration_ms: int = 300,
     ) -> Tuple[bool, str]:
         """滑动屏幕"""
-        ok, err = await self.run_shell(f"input swipe {x1} {y1} {x2} {y2} {duration_ms}")
-        return ok, f"从 ({x1},{y1}) 滑动到 ({x2},{y2})" if ok else err
+        try:
+            ix1, iy1, ix2, iy2 = int(x1), int(y1), int(x2), int(y2)
+            iduration = int(duration_ms)
+        except (ValueError, TypeError):
+            return False, "滑动坐标与时间参数必须为整数"
+        ok, err = await self.run_shell(f"input swipe {ix1} {iy1} {ix2} {iy2} {iduration}")
+        return ok, f"从 ({ix1},{iy1}) 滑动到 ({ix2},{iy2})" if ok else err
 
     async def swipe_direction(self, direction: str, distance_ratio: float = 0.5) -> Tuple[bool, str]:
         """按方向滑动（up/down/left/right，默认为上滑浏览下一个页面）"""
