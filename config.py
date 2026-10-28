@@ -90,7 +90,7 @@ class SlackOffSection(PluginConfigBase):
     )
     preferred_apps: str = Field(
         default="b站,知乎,小红书,抖音",
-        description="麦麦摸鱼爱逛的应用名称（逗号分隔）",
+        description="麦麦摸鱼爱逛的应用池（支持：b站, 知乎, 小红书, 抖音，用逗号分隔）",
     )
     share_interesting_finds: bool = Field(
         default=True,
@@ -98,7 +98,7 @@ class SlackOffSection(PluginConfigBase):
     )
     notify_summary: bool = Field(
         default=False,
-        description="摸鱼结束时是否发送打卡结算简报（默认关闭，仅在刷到精彩截图时才向主人发送，其余时间静默摸鱼）",
+        description="摸鱼结束时是否发送打卡结算简报（默认 false：仅抓到精彩截图时才向主人发送，其余时间静默摸鱼免打扰）",
     )
     swipe_interval_min: float = Field(
         default=3.0,
@@ -110,11 +110,11 @@ class SlackOffSection(PluginConfigBase):
     )
     notify_stream_id: str = Field(
         default="",
-        description="自动摸鱼时主通知目标：支持填写具体 stream_id、目标账号 ID；留空则自动根据 device.owner_qq 智能检索主人的私聊窗口",
+        description="摸鱼主动分享目标（留空最推荐：自动定位主人私聊窗口并支持多通道主备降级；亦可直接填主人 QQ 号或机器人号）",
     )
     fallback_stream_id: str = Field(
         default="",
-        description="备用通知目标（支持账号 ID 或 stream_id），当主通道异常时自动降级重试；留空若存在多机器人通道会自动选路",
+        description="备用通知目标（可选，当主通道发送失败时自动降级；留空若存在多机器人通道会自动选路作为备用）",
     )
     custom_llm_url: str = Field(
         default="",
