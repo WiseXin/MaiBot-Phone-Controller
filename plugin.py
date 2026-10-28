@@ -193,6 +193,15 @@ class PhoneControllerPlugin(MaiBotPlugin):
                                 except Exception as err:
                                     logger.warning("摸鱼主动出站消息发送失败: %s", err)
 
+                        async def _llm_comment(prompt: str) -> str:
+                            try:
+                                res = await self.ctx.llm.generate(prompt=prompt, temperature=0.85, max_tokens=100)
+                                if isinstance(res, dict) and res.get("response"):
+                                    return str(res["response"]).strip()
+                            except Exception as e:
+                                logger.debug("调用宿主 LLM 生成摸鱼配文失败: %s", e)
+                            return ""
+
                         # 执行自主摸鱼
                         res = await self.slacker.run_slacking_session(
                             app_name=target_app,
@@ -203,6 +212,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
                             custom_llm_url=cfg.slack_off.custom_llm_url,
                             custom_llm_key=cfg.slack_off.custom_llm_key,
                             custom_llm_model=cfg.slack_off.custom_llm_model,
+                            llm_caller=_llm_comment,
                         )
 
                         # 若开启了结算播报，且本轮未发送过截图分享，会话结束时向主人发送一条简短打卡总结
@@ -909,6 +919,15 @@ class PhoneControllerPlugin(MaiBotPlugin):
                 except Exception as e:
                     logger.warning("摸鱼分享发送失败: %s", e)
 
+        async def _llm_comment(prompt: str) -> str:
+            try:
+                res = await self.ctx.llm.generate(prompt=prompt, temperature=0.85, max_tokens=100)
+                if isinstance(res, dict) and res.get("response"):
+                    return str(res["response"]).strip()
+            except Exception as e:
+                logger.debug("调用宿主 LLM 生成摸鱼配文失败: %s", e)
+            return ""
+
         res = await self.slacker.run_slacking_session(
             app_name=app,
             duration_seconds=duration,
@@ -918,6 +937,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
             custom_llm_url=cfg.slack_off.custom_llm_url,
             custom_llm_key=cfg.slack_off.custom_llm_key,
             custom_llm_model=cfg.slack_off.custom_llm_model,
+            llm_caller=_llm_comment,
         )
         return res
 

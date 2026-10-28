@@ -100,16 +100,22 @@ class SlackerEngine:
         if re.fullmatch(r"[A-Za-z0-9_\s,\.\-]+", txt):
             return None
 
-        # 系统 UI 固定无意义黑名单
+        # 1. 小红书卡片专属格式解析: "笔记  <标题> 来自<作者> <赞数>赞" 或 "<标题> 来自<作者>..."
+        m_xhs = re.match(r"^(?:笔记\s+)?(.*?)\s+来自.*$", txt)
+        if m_xhs:
+            txt = m_xhs.group(1).strip()
+
+        # 2. 系统 UI 固定无意义黑名单
         blacklist = {
             "首页", "我的", "消息", "动态", "搜索", "关注", "推荐", "热门", "游戏中心",
             "个人主页", "返回", "设置", "分享", "评论", "点赞", "收藏", "投币", "转发",
-            "换一换", "刷新", "频道", "发布", "拍摄", "拍摄动态", "查看详情"
+            "换一换", "刷新", "频道", "发布", "拍摄", "拍摄动态", "查看详情",
+            "登录查看更多精彩内容", "去登录", "立即登录", "展开", "收起"
         }
         if txt in blacklist:
             return None
 
-        # 剔除常见的 Android 无障碍辅助描述与统计指标
+        # 3. 剔除常见的 Android 无障碍辅助描述与统计指标
         noise_sub = [
             r",?\s*轻点两下.*",
             r"^宣传图片，?",
@@ -121,14 +127,15 @@ class SlackerEngine:
             r",?\s*时长\d+.*",
             r",?\s*UP主.*",
             r",?\s*\d+(\.\d+)?[万千]?点赞.*",
+            r",?\s*\d+(\.\d+)?[万千]?赞.*",
         ]
         for p in noise_sub:
             txt = re.sub(p, "", txt, flags=re.IGNORECASE).strip()
 
         txt = txt.strip("，,。 ").strip()
 
-        # 真实的内容/文章/视频标题长度通常在 6~60 字之间，且必须含有中文字符
-        if len(txt) < 6 or len(txt) > 60:
+        # 真实的内容/文章/视频标题长度通常在 5~60 字之间，且必须含有中文字符
+        if len(txt) < 5 or len(txt) > 60:
             return None
         if not re.search(r"[\u4e00-\u9fa5]", txt):
             return None
@@ -136,19 +143,35 @@ class SlackerEngine:
         return txt
 
     async def extract_screen_topics(self) -> List[str]:
-        """抓取当前屏幕上的真实高质量内容标题（过滤 UI 噪音）"""
+        """抓取当前屏幕黄金视觉中心区域的高质量真实内容（按距离屏幕中心距离排序，确保截图与标题完全对齐）"""
         ok, elements, _ = await self.adb.dump_ui_elements()
         if not ok or not elements:
             return []
 
-        topics: List[str] = []
+        # 自动推算屏幕高度与黄金视觉中心线 (忽略顶部18%标题栏/状态栏和底部15%导航栏)
+        screen_h = max((el["bounds"][3] for el in elements if "bounds" in el and len(el["bounds"]) >= 4), default=2340)
+        center_y = screen_h / 2.0
+        min_y = screen_h * 0.18
+        max_y = screen_h * 0.85
+
+        scored_topics: List[Tuple[float, str]] = []
+        seen = set()
+
         for el in elements:
+            cy = el.get("center", [0, 0])[1]
+            if not (min_y <= cy <= max_y):
+                continue
+
             raw_txt = el.get("text", "").strip()
             cleaned = self._clean_topic_title(raw_txt)
-            if cleaned and cleaned not in topics:
-                topics.append(cleaned)
+            if cleaned and cleaned not in seen:
+                seen.add(cleaned)
+                dist = abs(cy - center_y)
+                scored_topics.append((dist, cleaned))
 
-        return topics[:10]
+        # 按距离屏幕纵向中心由近及远排序，排在第 1 位的必定是屏幕最正中、最抓眼的焦点大图/文章
+        scored_topics.sort(key=lambda x: x[0])
+        return [t[1] for t in scored_topics[:10]]
 
     @staticmethod
     def _is_safe_custom_url(url: str) -> bool:
@@ -246,16 +269,33 @@ class SlackerEngine:
         custom_llm_url: str = "",
         custom_llm_key: str = "",
         custom_llm_model: str = "gpt-3.5-turbo",
+        llm_caller: Optional[Callable[[str], Any]] = None,
     ) -> str:
-        """生成贴合人设、自然灵动的摸鱼分享吐槽（支持可选自定义安全公网 LLM 端点或高质拟真文案库）"""
-        # 1. 若用户在配置中提供了安全合规的公网 LLM 端点与 Key，通过外部大模型动态生成
+        """生成贴合人设、自然灵动的摸鱼分享吐槽（优先通过 LLM 动态生成，绝不使用机械报告腔）"""
+        topics_ctx = f"（屏幕上同时看到的其他内容：{', '.join(related_topics)}）" if related_topics else ""
+        prompt = (
+            f"你是小蓝，一个真实、温和随性、爱玩单机游戏的年轻女生。你刚刚在手机【{display_name}】刷到了一个很显眼的帖子/视频：\n"
+            f"标题是：《{best_title}》{topics_ctx}\n"
+            "现在你截了一张图发给老大（你的好友/主人）。请用非常简短的一句话（10~25个字），像年轻女生日常在微信打字聊天一样随口跟他说一句，把这张图分享给他。\n"
+            "要求：\n"
+            "1. 极其自然随性，就像你刚刚刷到了随手扔给他看一样。\n"
+            "2. 严禁出现'报告老大'、'摸鱼巡航'、'热门内容'、'抓到'、'为您汇报'等任何机械、客服、机器人报告腔词汇！\n"
+            "3. 直接输出你要打出的那一句话，不要包含引号、前后缀解释。"
+        )
+
+        # 1. 优先通过传入的宿主 LLM 生成
+        if llm_caller:
+            try:
+                res = await llm_caller(prompt)
+                if res and isinstance(res, str) and res.strip():
+                    cleaned = res.strip().strip('"\'''“”')
+                    if cleaned:
+                        return cleaned
+            except Exception as e:
+                logger.debug("通过上下文 LLM 生成摸鱼吐槽异常: %s", e)
+
+        # 2. 若用户在配置中提供了安全合规的公网 LLM 端点与 Key，通过外部大模型动态生成
         if custom_llm_url and custom_llm_key and self._is_safe_custom_url(custom_llm_url):
-            topics_ctx = f"（同时出现的其他话题：{', '.join(related_topics)}）" if related_topics else ""
-            prompt = (
-                f"你是小蓝，一个真实、温和随性爱玩单机游戏的年轻女生。刚才你在手机【{display_name}】刷到了一个热门内容："
-                f"《{best_title}》{topics_ctx}。"
-                "请用一两句话幽默、接地气地向老大（你的好友/主人）吐槽分享这个内容，就像日常打微信发朋友圈一样，自然有梗，严禁客服腔和AI说教："
-            )
             payload = {
                 "model": custom_llm_model or "gpt-3.5-turbo",
                 "messages": [{"role": "user", "content": prompt}],
@@ -276,19 +316,19 @@ class SlackerEngine:
                         return data["choices"][0]["message"]["content"].strip()
                 comment = await loop.run_in_executor(None, _call)
                 if comment:
-                    return comment
+                    return comment.strip('"\'''“”')
             except Exception as e:
                 logger.debug("自定义模型生成摸鱼吐槽失败，降级回退拟真词库: %s", e)
 
-        # 2. 内置丰富多样的拟真女生口吻模板库（零网络依赖，安全纯净）
-        templates = [
-            f"老大快看！刚才在手机上逛【{display_name}】，刷到了这个：‘{best_title}’，太有意思了哈哈哈，给你截了张图瞅瞅~",
-            f"报告老大！摸鱼巡航在【{display_name}】抓到一条热门内容：‘{best_title}’，笑得不行，分享给你！",
-            f"刚才闲着无聊划了一下【{display_name}】，看到这个‘{best_title}’，感觉特别搞，截屏发你看看~",
-            f"在【{display_name}】刷到一个超有梗的：‘{best_title}’！截图给你啦，速看~",
-            f"老大，今天【{display_name}】这篇‘{best_title}’有点东西，刚好刷到就顺手拍给你看看~",
+        # 3. 内置丰富多样的拟真女生口吻模板库（彻底剔除任何“报告老大/摸鱼巡航”等机械词汇）
+        natural_templates = [
+            f"刚才在【{display_name}】刷到这个，感觉挺有意思的，截屏给你瞅瞅~",
+            f"在【{display_name}】看到这个【{best_title}】，笑死我了，顺手截了一张",
+            f"刷【{display_name}】刷到个好玩的：‘{best_title}’，发你看看",
+            f"看我刚刚刷到了啥：‘{best_title}’，截图给你瞅瞅~",
+            f"刚才逛【{display_name}】看到这个，觉得有点意思，顺手截了个图给你",
         ]
-        return random.choice(templates)
+        return random.choice(natural_templates)
 
     async def run_slacking_session(
         self,
@@ -300,6 +340,7 @@ class SlackerEngine:
         custom_llm_url: str = "",
         custom_llm_key: str = "",
         custom_llm_model: str = "",
+        llm_caller: Optional[Callable[[str], Any]] = None,
     ) -> Dict[str, Any]:
         """
         执行一次拟人化自主摸鱼会话：
@@ -385,6 +426,7 @@ class SlackerEngine:
                             custom_llm_url=custom_llm_url,
                             custom_llm_key=custom_llm_key,
                             custom_llm_model=custom_llm_model,
+                            llm_caller=llm_caller,
                         )
                         try:
                             await share_callback(shot_path, msg)

@@ -33,7 +33,8 @@
   },
   "capabilities": [
     "send.text",
-    "send.image"
+    "send.image",
+    "llm.generate"
   ],
   "i18n": {
     "default_locale": "zh-CN",
