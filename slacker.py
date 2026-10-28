@@ -122,6 +122,35 @@ class SlackerEngine:
             return False
         return True
 
+    @staticmethod
+    def _cleanup_old_screenshots(runtime_dir: str, max_files: int = 30, max_age_seconds: int = 86400) -> None:
+        """清理过期的临时截图文件，防止长期自动摸鱼堆积磁盘空间"""
+        try:
+            if not runtime_dir or not os.path.exists(runtime_dir):
+                return
+            now = time.time()
+            img_files = []
+            for fname in os.listdir(runtime_dir):
+                if (fname.startswith("screenshot_") or fname.startswith("slack_find_")) and fname.endswith((".jpg", ".png")):
+                    fpath = os.path.join(runtime_dir, fname)
+                    try:
+                        mtime = os.path.getmtime(fpath)
+                        if now - mtime > max_age_seconds:
+                            os.remove(fpath)
+                        else:
+                            img_files.append((mtime, fpath))
+                    except OSError:
+                        pass
+            if len(img_files) > max_files:
+                img_files.sort(key=lambda x: x[0])
+                for _, old_path in img_files[:len(img_files) - max_files]:
+                    try:
+                        os.remove(old_path)
+                    except OSError:
+                        pass
+        except Exception as e:
+            logger.debug("清理临时截图文件忽略异常: %s", e)
+
     async def generate_lively_comment(
         self,
         display_name: str,
@@ -294,3 +323,4 @@ class SlackerEngine:
             return {"success": False, "message": f"摸鱼过程出现异常: {e}"}
         finally:
             self.is_slacking = False
+            self._cleanup_old_screenshots(self.runtime_dir)

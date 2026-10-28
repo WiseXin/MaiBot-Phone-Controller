@@ -204,19 +204,8 @@ class PhoneControllerPlugin(MaiBotPlugin):
     # -------------------------------------------------------------------------
 
     def _extract_user_id(self, kwargs: Dict[str, Any]) -> str:
-        """多级健壮提取调用者用户 ID (兼顾顶层注入、message 结构体与平台差异)"""
-        # 1. 优先顶层注入的 user_id / sender_id / author_id
-        uid = str(
-            kwargs.get("user_id")
-            or kwargs.get("sender_id")
-            or kwargs.get("author_id")
-            or kwargs.get("from_user_id")
-            or ""
-        ).strip()
-        if uid:
-            return uid
-
-        # 2. 从 message 字典或对象中深度解析
+        """多级健壮提取调用者用户 ID (优先宿主不可伪造的 message 结构体，安全防御)"""
+        # 1. 【安全第一】优先从宿主保证注入的底层 message 消息体解析（不可被大模型入参伪造）
         msg = kwargs.get("message")
         if isinstance(msg, dict):
             # 兼容格式: message["user_info"]["user_id"], message["sender"]["user_id"], message["author"]["id"] 等
@@ -248,6 +237,17 @@ class PhoneControllerPlugin(MaiBotPlugin):
             uid = str(getattr(msg, "user_id", "") or getattr(msg, "sender_id", "") or "").strip()
             if uid:
                 return uid
+
+        # 2. 仅在无 message 消息体时（例如单元测试或非消息驱动直接调用），回退到顶层注入字段
+        uid = str(
+            kwargs.get("user_id")
+            or kwargs.get("sender_id")
+            or kwargs.get("author_id")
+            or kwargs.get("from_user_id")
+            or ""
+        ).strip()
+        if uid:
+            return uid
 
         logger.warning(
             "【手机管家鉴权】未能从工具上下文中解析出调用者 ID，请求将被安全拦截。kwargs keys: %s, message 结构: %s",
@@ -321,6 +321,37 @@ class PhoneControllerPlugin(MaiBotPlugin):
             p = "/tmp/phone_controller"
             os.makedirs(p, exist_ok=True)
             return p
+
+    @staticmethod
+    def _cleanup_old_screenshots(runtime_dir: str, max_files: int = 30, max_age_seconds: int = 86400) -> None:
+        """清理过期的临时截图文件，防止长期自动摸鱼堆积磁盘空间"""
+        try:
+            if not os.path.exists(runtime_dir):
+                return
+            now = time.time()
+            img_files = []
+            for fname in os.listdir(runtime_dir):
+                if (fname.startswith("screenshot_") or fname.startswith("slack_find_")) and fname.endswith((".jpg", ".png")):
+                    fpath = os.path.join(runtime_dir, fname)
+                    try:
+                        mtime = os.path.getmtime(fpath)
+                        if now - mtime > max_age_seconds:
+                            os.remove(fpath)
+                        else:
+                            img_files.append((mtime, fpath))
+                    except OSError:
+                        pass
+
+            # 若保留文件数仍超过上限，删除最旧的文件
+            if len(img_files) > max_files:
+                img_files.sort(key=lambda x: x[0])
+                for _, old_path in img_files[:len(img_files) - max_files]:
+                    try:
+                        os.remove(old_path)
+                    except OSError:
+                        pass
+        except Exception as e:
+            logger.debug("清理临时截图文件忽略异常: %s", e)
 
     def _resolve_target(self, target: str, port: Optional[int] = None) -> Tuple[str, int, str]:
         """解析设备别名（如'小米'、'vivo'）或 IP:端口"""
@@ -501,6 +532,9 @@ class PhoneControllerPlugin(MaiBotPlugin):
                 await self.ctx.send.image(img_b64, stream_id)
             except Exception as e:
                 logger.warning("截图发送至聊天失败: %s", e)
+
+        # 顺手清理过期截图，避免长期运行占满磁盘
+        self._cleanup_old_screenshots(self._get_runtime_dir())
 
         return {"success": True, "message": "截图成功", "image_path": save_path}
 
