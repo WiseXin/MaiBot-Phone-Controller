@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import shutil
+import time
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional, Tuple
 from PIL import Image
@@ -225,27 +226,36 @@ class AdbEngine:
     async def capture_screenshot(self, output_path: str, quality: int = 75) -> Tuple[bool, str]:
         """
         截取手机当前画面并保存到本地 output_path。
-        采用管道直接抓取 PNG 字节，并在内存中用 PIL 压缩转为 JPEG，速度极快且节省磁盘。
+        先在手机端写 /sdcard/_screen_snap.png 然后 pull 拉取，比 exec-out 跨网管道稳定快速 4 倍以上。
         """
-        cmd = self._build_adb_cmd(["exec-out", "screencap", "-p"])
+        remote_tmp = "/sdcard/_screen_snap.png"
+        local_tmp = f"/tmp/_snap_{int(time.time() * 1000)}.png"
         try:
+            ok, err = await self.run_shell(f"screencap -p {remote_tmp}", timeout=10.0)
+            if not ok:
+                return False, f"screencap 失败: {err}"
+
             proc = await asyncio.create_subprocess_exec(
-                *cmd,
+                *self._build_adb_cmd(["pull", remote_tmp, local_tmp]),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            raw_data, stderr = await proc.communicate()
-            if proc.returncode != 0 or not raw_data:
-                return False, f"screencap 失败: {stderr.decode(errors='replace')}"
+            _, stderr = await proc.communicate()
+            if proc.returncode != 0 or not os.path.exists(local_tmp):
+                return False, f"pull 截图失败: {stderr.decode(errors='replace')}"
 
             # 转换为 JPG 压缩保存
-            image = Image.open(io.BytesIO(raw_data))
-            if image.mode in ("RGBA", "P"):
-                image = image.convert("RGB")
-            
-            # 确保父目录存在
-            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-            image.save(output_path, format="JPEG", quality=quality, optimize=True)
+            with Image.open(local_tmp) as img:
+                if img.mode in ("RGBA", "P"):
+                    img = img.convert("RGB")
+                os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+                img.save(output_path, format="JPEG", quality=quality, optimize=True)
+
+            try:
+                os.remove(local_tmp)
+            except Exception:
+                pass
+
             return True, output_path
         except Exception as e:
             logger.error("截图处理异常: %s", e)
@@ -458,30 +468,74 @@ class AdbEngine:
 
         for r in range(repeat):
             for i, act in enumerate(actions):
-                act_type = act.get("type", "").lower()
-                if act_type == "tap":
-                    ok, msg = await self.tap(int(act["x"]), int(act["y"]))
-                elif act_type == "tap_text":
-                    ok, msg = await self.tap_text(str(act["text"]))
-                elif act_type == "swipe":
-                    if "direction" in act:
-                        ok, msg = await self.swipe_direction(str(act["direction"]))
-                    else:
-                        ok, msg = await self.swipe(
-                            int(act["x1"]), int(act["y1"]), int(act["x2"]), int(act["y2"]), int(act.get("ms", 300))
-                        )
-                elif act_type == "text":
-                    ok, msg = await self.input_text(str(act["text"]))
-                elif act_type == "key":
-                    ok, msg = await self.press_key(str(act["key"]))
-                elif act_type == "sleep":
-                    ms = int(act.get("ms", 500))
-                    await asyncio.sleep(min(ms, 5000) / 1000.0)
-                    ok, msg = True, f"等待 {ms}ms"
-                else:
-                    ok, msg = False, f"未知的宏动作类型: {act_type}"
+                step_tag = f"[R{r+1}-Step{i+1}]"
 
-                logs.append(f"[R{r+1}-Step{i+1}] {msg}")
+                # 1. 健壮性防御：确保每个动作都是字典对象
+                if not isinstance(act, dict):
+                    logs.append(f"{step_tag} 错误：动作项必须为字典格式 (接收到: {type(act).__name__})，已跳过")
+                    continue
+
+                act_type = str(act.get("type", "")).lower().strip()
+                try:
+                    if act_type == "tap":
+                        x_raw, y_raw = act.get("x"), act.get("y")
+                        if x_raw is None or y_raw is None:
+                            logs.append(f"{step_tag} 失败：点击动作缺少必需参数 x 或 y")
+                            continue
+                        ok, msg = await self.tap(int(x_raw), int(y_raw))
+
+                    elif act_type == "tap_text":
+                        text_raw = act.get("text")
+                        if not text_raw:
+                            logs.append(f"{step_tag} 失败：文字点击缺少必需参数 text")
+                            continue
+                        ok, msg = await self.tap_text(str(text_raw))
+
+                    elif act_type == "swipe":
+                        if "direction" in act and act.get("direction"):
+                            ok, msg = await self.swipe_direction(str(act["direction"]))
+                        else:
+                            x1_raw, y1_raw = act.get("x1"), act.get("y1")
+                            x2_raw, y2_raw = act.get("x2"), act.get("y2")
+                            if None in (x1_raw, y1_raw, x2_raw, y2_raw):
+                                logs.append(f"{step_tag} 失败：滑动动作缺少完整坐标 (x1, y1, x2, y2)")
+                                continue
+                            ms_val = int(act.get("ms", 300))
+                            ok, msg = await self.swipe(int(x1_raw), int(y1_raw), int(x2_raw), int(y2_raw), ms_val)
+
+                    elif act_type == "text":
+                        text_val = str(act.get("text", ""))
+                        if not text_val:
+                            logs.append(f"{step_tag} 失败：输入动作缺少 text 参数")
+                            continue
+                        ok, msg = await self.input_text(text_val)
+
+                    elif act_type == "key":
+                        key_val = str(act.get("key", "")).strip()
+                        if not key_val:
+                            logs.append(f"{step_tag} 失败：按键动作缺少 key 参数")
+                            continue
+                        ok, msg = await self.press_key(key_val)
+
+                    elif act_type == "sleep":
+                        ms_raw = act.get("ms", 500)
+                        try:
+                            ms = int(ms_raw)
+                        except (ValueError, TypeError):
+                            ms = 500
+                        await asyncio.sleep(min(max(ms, 50), 5000) / 1000.0)
+                        ok, msg = True, f"等待 {ms}ms"
+
+                    else:
+                        ok, msg = False, f"未知的宏动作类型: '{act_type}'"
+
+                    logs.append(f"{step_tag} {msg}")
+
+                except (ValueError, TypeError) as val_err:
+                    logs.append(f"{step_tag} 参数类型转换错误: {val_err}")
+                except Exception as step_err:
+                    logs.append(f"{step_tag} 动作执行异常: {step_err}")
+
                 # 默认动作间微小延迟 300ms
                 await asyncio.sleep(0.3)
 

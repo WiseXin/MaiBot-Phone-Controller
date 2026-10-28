@@ -127,7 +127,16 @@ class SlackerEngine:
             r",?\s*时长\d+.*",
             r",?\s*UP主.*",
             r",?\s*\d+(\.\d+)?[万千]?点赞.*",
+            r",?\s*\d+(\.\d+)?[万千]?赞同.*",
+            r",?\s*\d+(\.\d+)?[万千]?人赞同.*",
             r",?\s*\d+(\.\d+)?[万千]?赞.*",
+            r",?\s*\d+条?评论.*",
+            r"\s*·\s*\d+.*",
+            # 抖音/短视频平台专属交互按钮文本过滤
+            r",?\s*(?:未点赞|已点赞|未收藏|已收藏|未选中|已选中)[，, ]?.*",
+            r"^(?:未点赞|已点赞|未收藏|已收藏|未选中|已选中)[，, ]?.*",
+            r"^(?:喜欢|评论|收藏|分享)\d+(\.\d+)?[万千]?.*",
+            r",?\s*喜欢\d+(\.\d+)?[万千]?.*",
         ]
         for p in noise_sub:
             txt = re.sub(p, "", txt, flags=re.IGNORECASE).strip()
@@ -358,13 +367,11 @@ class SlackerEngine:
         shared_snapshots: List[str] = []
 
         try:
-            # 1. 确保屏幕亮起并解锁到前台（若本来就亮着则不按电源键，防误熄屏）
-            st = await self.adb.get_status()
-            if not st.get("screen_on"):
-                await self.adb.press_key("power")  # 灭屏才点亮
-                await asyncio.sleep(0.5)
-                await self.adb.swipe(540, 1800, 540, 600, 300)  # 上滑解锁
-                await asyncio.sleep(0.5)
+            # 1. 确保屏幕亮起并彻底解散锁屏到前台
+            await self.adb.press_key("224")  # KEYCODE_WAKEUP 唤醒屏幕
+            await self.adb.run_shell("wm dismiss-keyguard")
+            await self.adb.swipe(540, 1800, 540, 400, 200)  # 稳妥上滑穿透锁屏
+            await asyncio.sleep(0.6)
 
             # 2. 启动目标 App
             app_info = SLACK_APPS.get(app_name.lower())
