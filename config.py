@@ -97,8 +97,8 @@ class SlackOffSection(PluginConfigBase):
         description="摸鱼刷到有趣内容时，是否自动抓取截图分享给主人",
     )
     notify_summary: bool = Field(
-        default=True,
-        description="摸鱼结束时是否发送打卡结算简报（若关闭，则仅在刷到精彩截图时才向主人发送，其余时间静默摸鱼）",
+        default=False,
+        description="摸鱼结束时是否发送打卡结算简报（默认关闭，仅在刷到精彩截图时才向主人发送，其余时间静默摸鱼）",
     )
     swipe_interval_min: float = Field(
         default=3.0,

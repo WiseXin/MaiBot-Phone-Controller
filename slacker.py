@@ -9,12 +9,16 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
 import random
+import re
+import socket
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
+import urllib.parse
 import urllib.request
 
 logger = logging.getLogger("plugin.phone_controller.slacker")
@@ -85,44 +89,125 @@ class SlackerEngine:
                 return True
         return False
 
+    @staticmethod
+    def _clean_topic_title(raw_text: str) -> Optional[str]:
+        """深度清洗屏幕提取文本，坚决剔除按钮、无障碍辅助标签、图标等系统 UI 噪音"""
+        txt = raw_text.strip()
+        if not txt or len(txt) < 5 or txt.isdigit():
+            return None
+
+        # 纯英文组件标识或纯符号标签直接剔除
+        if re.fullmatch(r"[A-Za-z0-9_\s,\.\-]+", txt):
+            return None
+
+        # 系统 UI 固定无意义黑名单
+        blacklist = {
+            "首页", "我的", "消息", "动态", "搜索", "关注", "推荐", "热门", "游戏中心",
+            "个人主页", "返回", "设置", "分享", "评论", "点赞", "收藏", "投币", "转发",
+            "换一换", "刷新", "频道", "发布", "拍摄", "拍摄动态", "查看详情"
+        }
+        if txt in blacklist:
+            return None
+
+        # 剔除常见的 Android 无障碍辅助描述与统计指标
+        noise_sub = [
+            r",?\s*轻点两下.*",
+            r"^宣传图片，?",
+            r",?\s*\d+之\d+，?",
+            r",?\s*(?:竖屏|竖版|横屏).*",
+            r",?\s*(?:按钮|图标|icon|avatar).*",
+            r",?\s*\d+(\.\d+)?[万千]?观看.*",
+            r",?\s*\d+弹幕.*",
+            r",?\s*时长\d+.*",
+            r",?\s*UP主.*",
+            r",?\s*\d+(\.\d+)?[万千]?点赞.*",
+        ]
+        for p in noise_sub:
+            txt = re.sub(p, "", txt, flags=re.IGNORECASE).strip()
+
+        txt = txt.strip("，,。 ").strip()
+
+        # 真实的内容/文章/视频标题长度通常在 6~60 字之间，且必须含有中文字符
+        if len(txt) < 6 or len(txt) > 60:
+            return None
+        if not re.search(r"[\u4e00-\u9fa5]", txt):
+            return None
+
+        return txt
+
     async def extract_screen_topics(self) -> List[str]:
-        """抓取当前屏幕上的有价值文本（标题、热点、动态）"""
+        """抓取当前屏幕上的真实高质量内容标题（过滤 UI 噪音）"""
         ok, elements, _ = await self.adb.dump_ui_elements()
         if not ok or not elements:
             return []
 
         topics: List[str] = []
         for el in elements:
-            txt = el.get("text", "").strip()
-            # 过滤掉系统状态栏和纯图标文字
-            if len(txt) >= 4 and not txt.isdigit():
-                # 排除纯时间、纯电量、返回等控件
-                if txt not in ("首页", "我的", "消息", "动态", "搜索", "关注", "推荐", "热门"):
-                    topics.append(txt)
+            raw_txt = el.get("text", "").strip()
+            cleaned = self._clean_topic_title(raw_txt)
+            if cleaned and cleaned not in topics:
+                topics.append(cleaned)
 
         return topics[:10]
 
     @staticmethod
     def _is_safe_custom_url(url: str) -> bool:
-        """严格校验自定义 LLM URL（防范 SSRF 探测本地/内网/敏感云元数据端点）"""
+        """严格校验自定义 LLM URL（通过解析 Host 与 IP，全量防范十进制/八进制/IPv6 等各进制 SSRF 绕过）"""
         if not url or not isinstance(url, str):
             return False
-        clean = url.strip().lower()
-        if not (clean.startswith("http://") or clean.startswith("https://")):
+        clean = url.strip()
+        try:
+            parsed = urllib.parse.urlparse(clean)
+            if parsed.scheme.lower() not in ("http", "https"):
+                return False
+
+            hostname = (parsed.hostname or "").lower().strip()
+            if not hostname:
+                return False
+
+            # 1. 拦截常见回环域名、云厂商元数据域名与内网本地后缀
+            blocked_domains = {
+                "localhost", "0.0.0.0", "metadata.google", "metadata.tencent",
+                "metadata.aws", "169.254.169.254", "instance-data"
+            }
+            if hostname in blocked_domains or hostname.endswith(".internal") or hostname.endswith(".local"):
+                logger.warning("自定义 LLM URL 命中受限域名黑名单: %s", url)
+                return False
+
+            # 2. 尝试转为 IP 地址判定（底层自动处理点分十进制、十进制纯整数、八进制/十六进制与 IPv6）
+            ip = None
+            try:
+                if hostname.isdigit():
+                    ip = ipaddress.ip_address(int(hostname))
+                elif hostname.startswith("0x"):
+                    ip = ipaddress.ip_address(int(hostname, 16))
+                else:
+                    try:
+                        ip = ipaddress.ip_address(hostname)
+                    except ValueError:
+                        # 兼容处理点分八进制/点分十六进制（如 0177.0.0.1）
+                        if "." in hostname and all(part.isalnum() for part in hostname.split(".")):
+                            ip = ipaddress.ip_address(socket.inet_aton(hostname))
+            except Exception:
+                pass
+
+            if ip is not None:
+                # 严格拦截私有网段 (10/192.168/172.16-31)、回环 (127.0.0.1)、链路本地 (169.254) 与未指定/保留 IP
+                if (
+                    ip.is_private
+                    or ip.is_loopback
+                    or ip.is_link_local
+                    or ip.is_reserved
+                    or ip.is_unspecified
+                    or ip.is_multicast
+                ):
+                    logger.warning("自定义 LLM URL 命中私网/保留/回环 IP 拦截: %s (解析为 %s)", url, ip)
+                    return False
+
+            return True
+        except Exception as e:
+            logger.warning("自定义 LLM URL 安全解析异常拦截: %s (%s)", url, e)
             return False
-        # 拦截回环地址、常见云厂商元数据端点与私有局域网网段
-        blocked_hosts = [
-            "127.0.0.1", "localhost", "0.0.0.0", "::1",
-            "169.254.", "metadata.google", "metadata.tencent",
-            "100.100.100.200", "10.", "192.168.",
-            "172.16.", "172.17.", "172.18.", "172.19.", "172.20.",
-            "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
-            "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31."
-        ]
-        if any(b in clean for b in blocked_hosts):
-            logger.warning("自定义 LLM URL 命中安全策略拦截(禁止本地/内网/元数据地址): %s", url)
-            return False
-        return True
 
     @staticmethod
     def _cleanup_old_screenshots(runtime_dir: str, max_files: int = 30, max_age_seconds: int = 86400) -> None:
@@ -255,6 +340,7 @@ class SlackerEngine:
             # 3. 循环摸鱼浏览
             start_time = time.time()
             swipe_count = 0
+            has_shared_snapshot = False
 
             while time.time() - start_time < duration_seconds:
                 # 防误触广告跳转：如果意外跳出了目标应用，自动按返回键拉回前台
@@ -282,12 +368,13 @@ class SlackerEngine:
                 if topics:
                     discovered_contents.extend(topics)
 
-                # 约每滑 4~6 次，抽查一次是否有高价值内容并决定是否拍照分享给主人
-                if swipe_count % random.randint(4, 6) == 0 and topics and share_callback:
+                # 滑动 2 次以上、抓取到了真实优质标题且本轮尚未分享过，稳定截一张高清图分享给主人（单轮精选 1 张，绝不刷屏）
+                if not has_shared_snapshot and swipe_count >= 2 and topics and share_callback:
                     # 抓取一张截图
                     shot_path = os.path.join(self.runtime_dir, f"slack_find_{session_id}_{swipe_count}.jpg")
                     ok, res = await self.adb.capture_screenshot(shot_path, quality=75)
                     if ok:
+                        has_shared_snapshot = True
                         shared_snapshots.append(shot_path)
                         best_title = topics[0]
                         # 生成有梗、活泼的少女感总结吐槽
@@ -305,11 +392,11 @@ class SlackerEngine:
                             logger.warning("摸鱼分享回调执行失败: %s", e)
 
             # 去重整理摸鱼成果
-            unique_topics = list(dict.fromkeys(discovered_contents))[:8]
-            summary_msg = (
-                f"麦麦在【{display_name}】摸鱼完毕啦！总共划拉了 {swipe_count} 次，"
-                f"看到了这些热门内容：{', '.join(unique_topics) if unique_topics else '很多精彩动态'}"
-            )
+            unique_topics = list(dict.fromkeys(discovered_contents))[:4]
+            if unique_topics:
+                summary_msg = f"刚才在【{display_name}】逛了一会儿，看了看《{unique_topics[0]}》这些热门动态~"
+            else:
+                summary_msg = f"刚才去【{display_name}】溜达了一圈，刷了刷动态，没看到特别有意思的~"
 
             return {
                 "success": True,

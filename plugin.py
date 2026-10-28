@@ -311,51 +311,47 @@ class PhoneControllerPlugin(MaiBotPlugin):
         # 1. 【安全第一】优先从宿主保证注入的底层 message 消息体解析（不可被大模型入参伪造）
         msg = kwargs.get("message")
         if isinstance(msg, dict):
-            # 兼容格式: message["user_info"]["user_id"], message["sender"]["user_id"], message["author"]["id"] 等
-            user_info = (
-                msg.get("user_info")
-                or msg.get("sender")
-                or msg.get("author")
-                or msg.get("from_user")
-                or {}
-            )
-            if isinstance(user_info, dict):
-                uid = str(user_info.get("user_id") or user_info.get("id") or "").strip()
-                if uid:
-                    return uid
-            uid = str(msg.get("user_id") or msg.get("sender_id") or msg.get("author_id") or "").strip()
-            if uid:
-                return uid
+            # 常见嵌套容器与 candidate keys (兼容 QQ官方Bot, OneBot, NapCat, Discord, Telegram 等)
+            candidate_containers = [
+                msg.get("user_info"),
+                msg.get("sender"),
+                msg.get("author"),
+                msg.get("from_user"),
+                msg.get("data"),
+                msg,
+            ]
+            candidate_keys = ["user_id", "id", "sender_id", "author_id", "userId", "open_id"]
+            for container in candidate_containers:
+                if isinstance(container, dict):
+                    for k in candidate_keys:
+                        val = str(container.get(k) or "").strip()
+                        if val and val != "None":
+                            return val
+
         elif msg is not None:
-            user_info = (
-                getattr(msg, "user_info", None)
-                or getattr(msg, "sender", None)
-                or getattr(msg, "author", None)
-                or getattr(msg, "from_user", None)
-            )
-            if user_info is not None:
-                uid = str(getattr(user_info, "user_id", "") or getattr(user_info, "id", "") or "").strip()
-                if uid:
-                    return uid
-            uid = str(getattr(msg, "user_id", "") or getattr(msg, "sender_id", "") or "").strip()
-            if uid:
-                return uid
+            # 对象形式属性多级探测
+            for attr in ("user_info", "sender", "author", "from_user", "data"):
+                sub = getattr(msg, attr, None)
+                if sub is not None:
+                    for k in ("user_id", "id", "sender_id", "author_id", "userId", "open_id"):
+                        val = str(getattr(sub, k, "") or "").strip()
+                        if val and val != "None":
+                            return val
+            for k in ("user_id", "id", "sender_id", "author_id", "userId"):
+                val = str(getattr(msg, k, "") or "").strip()
+                if val and val != "None":
+                    return val
 
         # 2. 仅在无 message 消息体时（例如单元测试或非消息驱动直接调用），回退到顶层注入字段
-        uid = str(
-            kwargs.get("user_id")
-            or kwargs.get("sender_id")
-            or kwargs.get("author_id")
-            or kwargs.get("from_user_id")
-            or ""
-        ).strip()
-        if uid:
-            return uid
+        for top_key in ("user_id", "sender_id", "author_id", "from_user_id"):
+            val = str(kwargs.get(top_key) or "").strip()
+            if val and val != "None":
+                return val
 
         logger.warning(
-            "【手机管家鉴权】未能从工具上下文中解析出调用者 ID，请求将被安全拦截。kwargs keys: %s, message 结构: %s",
+            "【手机管家鉴权】未能从工具上下文中解析出调用者 ID，请求将被安全拦截。kwargs keys: %s, message keys: %s",
             list(kwargs.keys()),
-            repr(msg)[:200] if msg else "无",
+            list(msg.keys()) if isinstance(msg, dict) else (dir(msg) if msg else "无"),
         )
         return ""
 
@@ -824,8 +820,12 @@ class PhoneControllerPlugin(MaiBotPlugin):
         except Exception as e:
             return {"success": False, "message": f"JSON 解析失败: {e}"}
 
-        ok, logs = await self.adb.execute_macro(actions, repeat=repeat)
-        return {"success": ok, "logs": logs}
+        try:
+            ok, logs = await self.adb.execute_macro(actions, repeat=repeat)
+            return {"success": ok, "logs": logs}
+        except Exception as e:
+            logger.error("执行宏连招异常未捕获: %s", e)
+            return {"success": False, "message": f"宏连招执行异常: {e}"}
 
     # -------------------------------------------------------------------------
     # 4. 拟人化自主摸鱼 (数字生命模式)
