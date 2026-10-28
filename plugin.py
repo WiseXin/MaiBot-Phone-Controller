@@ -205,8 +205,9 @@ class PhoneControllerPlugin(MaiBotPlugin):
                             custom_llm_model=cfg.slack_off.custom_llm_model,
                         )
 
-                        # 若摸鱼期间未触发截图分享，但会话圆满结束，向主人发一条简短打卡总结
-                        if res and res.get("success") and not res.get("snapshots") and cfg.slack_off.share_interesting_finds:
+                        # 若开启了结算播报，且本轮未发送过截图分享，会话结束时向主人发送一条简短打卡总结
+                        notify_summary_enabled = getattr(cfg.slack_off, "notify_summary", True)
+                        if res and res.get("success") and not res.get("snapshots") and notify_summary_enabled:
                             summary_text = res.get("message")
                             if summary_text:
                                 await _send_with_fallback(text=summary_text)
