@@ -25,7 +25,7 @@ class PluginSection(PluginConfigBase):
         },
     )
     version: str = Field(
-        default="1.1.0",
+        default="1.1.1",
         description="插件版本",
         json_schema_extra={
             "label": "插件版本",
@@ -33,7 +33,7 @@ class PluginSection(PluginConfigBase):
         },
     )
     config_version: str = Field(
-        default="1.1.0",
+        default="1.1.1",
         description="配置版本(Runner 校验)",
         json_schema_extra={
             "label": "配置结构版本",

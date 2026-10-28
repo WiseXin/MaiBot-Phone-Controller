@@ -236,8 +236,8 @@
 ```toml
 [plugin]
 name = "phone_controller"
-version = "1.1.0"
-config_version = "1.1.0"
+version = "1.1.1"
+config_version = "1.1.1"
 enabled = true                                  # 是否开启本插件 (true=开启, false=关闭)
 
 [device]
