@@ -110,11 +110,11 @@ class SlackOffSection(PluginConfigBase):
     )
     notify_stream_id: str = Field(
         default="",
-        description="自动摸鱼时主通知目标：支持直接填写【QQ号】（如 489618891）或具体 stream_id；留空则自动根据 device.owner_qq 反查主人私聊窗口",
+        description="自动摸鱼时主通知目标：支持填写具体 stream_id、目标账号 ID；留空则自动根据 device.owner_qq 智能检索主人的私聊窗口",
     )
     fallback_stream_id: str = Field(
         default="",
-        description="备用通知目标（支持 QQ 号或 stream_id），当主通道异常时自动降级尝试",
+        description="备用通知目标（支持账号 ID 或 stream_id），当主通道异常时自动降级重试；留空若存在多机器人通道会自动选路",
     )
     custom_llm_url: str = Field(
         default="",

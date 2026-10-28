@@ -231,49 +231,42 @@ class PhoneControllerPlugin(MaiBotPlugin):
                 await asyncio.sleep(600)
 
     def _resolve_owner_notification_streams(self) -> Tuple[Optional[str], Optional[str]]:
-        """智能解析摸鱼通报会话流 (支持直接按机器人QQ号、主人QQ号或显式 stream_id 智能路由)"""
+        """智能解析摸鱼通报会话流 (完全通用：支持显式 stream_id、动态反查主人私聊会话，零硬编码)"""
         cfg: PhoneControllerConfig = self.config
         target = cfg.slack_off.notify_stream_id.strip()
         fallback = getattr(cfg.slack_off, "fallback_stream_id", "").strip()
 
-        # 解析主人的 QQ 号（作为消息接收者）
-        owner_qq = "489618891"
-        for part in cfg.device.owner_qq.replace("，", ",").split(","):
-            p = part.strip()
-            if p.isdigit():
-                owner_qq = p
-                break
+        # 1. 若配置的是非纯数字且非空的 stream_id（如 32 位 MD5 或其他平台会话 ID），直接使用
+        if target and not target.isdigit():
+            return target, fallback
 
-        # 针对纯数字 QQ 号（机器人QQ号 或 主人QQ号）做多维度语义识别
-        if target.isdigit():
-            # 1. 如果用户指定的是小号 NapCat QQ号（3131124785）
-            if target == "3131124785":
-                official_stream, napcat_stream = self._lookup_sessions_by_qq(owner_qq)
-                return (napcat_stream or self._last_owner_stream_id), (official_stream or fallback)
-            # 2. 如果用户填的是主人的 QQ 号（如 489618891）
-            elif target == owner_qq:
-                official_stream, napcat_stream = self._lookup_sessions_by_qq(target)
-                final_target = official_stream or napcat_stream or self._last_owner_stream_id
-                final_fallback = napcat_stream if (official_stream and napcat_stream != official_stream) else fallback
-                return final_target, final_fallback
-            # 3. 如果用户指定的是官方机器人专属QQ号（如主号机器人 4015563329、4019687781 等）
-            else:
-                official_stream, napcat_stream = self._lookup_sessions_by_qq(owner_qq)
-                return (official_stream or self._last_owner_stream_id), (napcat_stream or fallback)
+        # 2. 提取配置的所有主人账号列表（完全由用户在 device.owner_qq 配置，绝不硬编码）
+        owner_accounts: List[str] = [
+            p.strip()
+            for p in cfg.device.owner_qq.replace("，", ",").split(",")
+            if p.strip()
+        ]
 
-        elif not target:
-            # 留空：自动取主人 QQ 号走双通道（官方主，小号备）
-            official_stream, napcat_stream = self._lookup_sessions_by_qq(owner_qq)
-            final_target = official_stream or napcat_stream or self._last_owner_stream_id
-            final_fallback = napcat_stream if (official_stream and napcat_stream != official_stream) else fallback
-            return final_target, final_fallback
+        # 3. 动态从数据库反查会话（完全动态匹配，无任何私人数据）
+        primary_stream, secondary_stream = self._lookup_sessions_dynamically(target, owner_accounts)
 
-        return target or self._last_owner_stream_id, fallback
+        final_target = primary_stream or target or self._last_owner_stream_id
+        final_fallback = fallback or secondary_stream
 
-    def _lookup_sessions_by_qq(self, qq_number: str) -> Tuple[Optional[str], Optional[str]]:
-        """从 MaiBot 数据库自动反查指定 QQ 号的官方机器人私聊会话与小号私聊会话"""
-        official_stream = None
-        napcat_stream = None
+        return final_target, final_fallback
+
+    def _lookup_sessions_dynamically(
+        self,
+        target_input: str,
+        owner_accounts: List[str],
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """从 MaiBot 数据库动态检索匹配的私聊会话（主通道与降级备用通道，零硬编码）"""
+        primary_stream = None
+        fallback_stream = None
+
+        if not owner_accounts:
+            return None, None
+
         try:
             import sqlite3
             from pathlib import Path
@@ -282,25 +275,57 @@ class PhoneControllerPlugin(MaiBotPlugin):
                 Path("/opt/maibot/instance/data/MaiBot.db"),
             ]
             db_path = next((p for p in db_candidates if p.exists()), None)
-            if db_path is not None:
-                with sqlite3.connect(db_path) as conn:
-                    c = conn.cursor()
-                    r1 = c.execute(
-                        "SELECT session_id FROM chat_sessions WHERE platform='qq' AND user_id=? AND group_id IS NULL AND account_id != '3131124785' ORDER BY id DESC LIMIT 1",
-                        (str(qq_number),)
-                    ).fetchone()
-                    if r1:
-                        official_stream = r1[0]
+            if db_path is None or not db_path.exists():
+                return None, None
 
-                    r2 = c.execute(
-                        "SELECT session_id FROM chat_sessions WHERE platform='qq' AND user_id=? AND group_id IS NULL AND account_id = '3131124785' ORDER BY id DESC LIMIT 1",
-                        (str(qq_number),)
-                    ).fetchone()
-                    if r2:
-                        napcat_stream = r2[0]
+            with sqlite3.connect(db_path) as conn:
+                c = conn.cursor()
+
+                # 情况一：如果 target_input 是一个具体的数字 ID（可能是机器人账号，也可能是主人账号）
+                if target_input.isdigit():
+                    # 1. 尝试作为【机器人账号(account_id)】：寻找该机器人与任一主人的私聊窗口
+                    for owner in owner_accounts:
+                        r = c.execute(
+                            "SELECT session_id, account_id FROM chat_sessions "
+                            "WHERE user_id = ? AND account_id = ? AND group_id IS NULL "
+                            "ORDER BY id DESC LIMIT 1",
+                            (owner, target_input)
+                        ).fetchone()
+                        if r:
+                            primary_stream = r[0]
+                            # 寻找另一个不同 account_id 的会话作为备用通道
+                            r_fallback = c.execute(
+                                "SELECT session_id FROM chat_sessions "
+                                "WHERE user_id = ? AND account_id != ? AND group_id IS NULL "
+                                "ORDER BY id DESC LIMIT 1",
+                                (owner, target_input)
+                            ).fetchone()
+                            if r_fallback:
+                                fallback_stream = r_fallback[0]
+                            return primary_stream, fallback_stream
+
+                # 情况二：target_input 为空，或 target_input 为主人账号 -> 动态查找主人最近活跃的私聊会话
+                placeholders = ",".join("?" for _ in owner_accounts)
+                rows = c.execute(
+                    f"SELECT session_id, account_id FROM chat_sessions "
+                    f"WHERE user_id IN ({placeholders}) AND group_id IS NULL "
+                    f"ORDER BY id DESC",
+                    tuple(owner_accounts)
+                ).fetchall()
+
+                if rows:
+                    primary_stream = rows[0][0]
+                    first_account = rows[0][1]
+                    # 自动挑选另一个不同 account_id 的私聊会话作为降级备用通道
+                    for s_id, acc in rows[1:]:
+                        if acc != first_account:
+                            fallback_stream = s_id
+                            break
+
         except Exception as e:
-            logger.warning("通过 QQ 号自动反查私聊会话异常: %s", e)
-        return official_stream, napcat_stream
+            logger.warning("动态反查通知会话异常: %s", e)
+
+        return primary_stream, fallback_stream
 
     # -------------------------------------------------------------------------
     # 安全防御辅助
