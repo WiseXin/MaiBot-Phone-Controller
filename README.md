@@ -241,7 +241,7 @@ config_version = "1.1.0"
 enabled = true                                  # 是否开启本插件 (true=开启, false=关闭)
 
 [device]
-# ADB 命令行路径。默认 "adb" 即可，系统会自动探测环境变量
+# ADB 命令行路径。默认 "adb" 即可，系统会自动探测环境变量（请确保仅指向受信任的 adb 程序）
 adb_path = "adb"
 
 # 受控手机无线调试 IP（支持 Tailscale 专网 IP 如 100.x.x.x、局域网 IP 或留空）

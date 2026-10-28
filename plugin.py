@@ -157,7 +157,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
                         target_app = random.choice(apps) if apps else "b站"
                         logger.info("【数字生命】麦麦闲来无事，自主拿起手机去刷【%s】啦！", target_app)
 
-                        target_stream, fallback_stream = self._resolve_owner_notification_streams()
+                        target_stream, fallback_stream = await self._resolve_owner_notification_streams()
 
                         async def _send_with_fallback(text: Optional[str] = None, img_b64: Optional[str] = None) -> bool:
                             candidates = [s for s in (target_stream, fallback_stream) if s]
@@ -195,7 +195,12 @@ class PhoneControllerPlugin(MaiBotPlugin):
 
                         async def _llm_comment(prompt: str) -> str:
                             try:
-                                res = await self.ctx.llm.generate(prompt=prompt, temperature=0.85, max_tokens=100)
+                                res = await self.ctx.llm.generate(
+                                    prompt=prompt,
+                                    task_name="replyer",
+                                    temperature=0.85,
+                                    max_tokens=800,
+                                )
                                 if isinstance(res, dict) and res.get("response"):
                                     return str(res["response"]).strip()
                             except Exception as e:
@@ -240,13 +245,13 @@ class PhoneControllerPlugin(MaiBotPlugin):
                 logger.error("自动摸鱼循环异常: %s", e)
                 await asyncio.sleep(600)
 
-    def _resolve_owner_notification_streams(self) -> Tuple[Optional[str], Optional[str]]:
-        """智能解析摸鱼通报会话流 (完全通用：支持显式 stream_id、动态反查主人私聊会话，零硬编码)"""
+    async def _resolve_owner_notification_streams(self) -> Tuple[Optional[str], Optional[str]]:
+        """通过官方 SDK ctx.chat.get_stream_by_user_id API 智能解析主人私聊会话 (主通道与降级备用)"""
         cfg: PhoneControllerConfig = self.config
         target = cfg.slack_off.notify_stream_id.strip()
         fallback = getattr(cfg.slack_off, "fallback_stream_id", "").strip()
 
-        # 1. 若配置的是非纯数字且非空的 stream_id（如 32 位 MD5 或其他平台会话 ID），直接使用
+        # 1. 若用户显式配置了非纯数字且非空的 stream_id（如 32 位 MD5 或其他特定流 ID），直接使用
         if target and not target.isdigit():
             return target, fallback
 
@@ -257,85 +262,30 @@ class PhoneControllerPlugin(MaiBotPlugin):
             if p.strip()
         ]
 
-        # 3. 动态从数据库反查会话（完全动态匹配，无任何私人数据）
-        primary_stream, secondary_stream = self._lookup_sessions_dynamically(target, owner_accounts)
+        found_streams: List[str] = []
+
+        # 3. 通过官方 capability 接口查找主人在各个平台上的私聊流 (支持 qq 与 discord 平台)
+        for owner in owner_accounts:
+            for plat in ("qq", "discord"):
+                try:
+                    res = await self.ctx.chat.get_stream_by_user_id(user_id=owner, platform=plat)
+                    s_id = None
+                    if isinstance(res, dict):
+                        s_id = res.get("stream_id") or res.get("session_id")
+                    elif res is not None:
+                        s_id = getattr(res, "stream_id", None) or getattr(res, "session_id", None)
+                    if s_id and str(s_id) not in found_streams:
+                        found_streams.append(str(s_id))
+                except Exception as e:
+                    logger.debug("通过 ctx.chat.get_stream_by_user_id 查找会话异常 (%s, %s): %s", owner, plat, e)
+
+        primary_stream = found_streams[0] if len(found_streams) >= 1 else None
+        secondary_stream = found_streams[1] if len(found_streams) >= 2 else None
 
         final_target = primary_stream or target or self._last_owner_stream_id
         final_fallback = fallback or secondary_stream
 
         return final_target, final_fallback
-
-    def _lookup_sessions_dynamically(
-        self,
-        target_input: str,
-        owner_accounts: List[str],
-    ) -> Tuple[Optional[str], Optional[str]]:
-        """从 MaiBot 数据库动态检索匹配的私聊会话（主通道与降级备用通道，零硬编码）"""
-        primary_stream = None
-        fallback_stream = None
-
-        if not owner_accounts:
-            return None, None
-
-        try:
-            import sqlite3
-            from pathlib import Path
-            db_candidates = [
-                self.ctx.paths.data_dir.parent / "MaiBot.db",
-                Path("/opt/maibot/instance/data/MaiBot.db"),
-            ]
-            db_path = next((p for p in db_candidates if p.exists()), None)
-            if db_path is None or not db_path.exists():
-                return None, None
-
-            with sqlite3.connect(db_path) as conn:
-                c = conn.cursor()
-
-                # 情况一：如果 target_input 是一个具体的数字 ID（可能是机器人账号，也可能是主人账号）
-                if target_input.isdigit():
-                    # 1. 尝试作为【机器人账号(account_id)】：寻找该机器人与任一主人的私聊窗口
-                    for owner in owner_accounts:
-                        r = c.execute(
-                            "SELECT session_id, account_id FROM chat_sessions "
-                            "WHERE user_id = ? AND account_id = ? AND group_id IS NULL "
-                            "ORDER BY id DESC LIMIT 1",
-                            (owner, target_input)
-                        ).fetchone()
-                        if r:
-                            primary_stream = r[0]
-                            # 寻找另一个不同 account_id 的会话作为备用通道
-                            r_fallback = c.execute(
-                                "SELECT session_id FROM chat_sessions "
-                                "WHERE user_id = ? AND account_id != ? AND group_id IS NULL "
-                                "ORDER BY id DESC LIMIT 1",
-                                (owner, target_input)
-                            ).fetchone()
-                            if r_fallback:
-                                fallback_stream = r_fallback[0]
-                            return primary_stream, fallback_stream
-
-                # 情况二：target_input 为空，或 target_input 为主人账号 -> 动态查找主人最近活跃的私聊会话
-                placeholders = ",".join("?" for _ in owner_accounts)
-                rows = c.execute(
-                    f"SELECT session_id, account_id FROM chat_sessions "
-                    f"WHERE user_id IN ({placeholders}) AND group_id IS NULL "
-                    f"ORDER BY id DESC",
-                    tuple(owner_accounts)
-                ).fetchall()
-
-                if rows:
-                    primary_stream = rows[0][0]
-                    first_account = rows[0][1]
-                    # 自动挑选另一个不同 account_id 的私聊会话作为降级备用通道
-                    for s_id, acc in rows[1:]:
-                        if acc != first_account:
-                            fallback_stream = s_id
-                            break
-
-        except Exception as e:
-            logger.warning("动态反查通知会话异常: %s", e)
-
-        return primary_stream, fallback_stream
 
     # -------------------------------------------------------------------------
     # 安全防御辅助
@@ -921,7 +871,12 @@ class PhoneControllerPlugin(MaiBotPlugin):
 
         async def _llm_comment(prompt: str) -> str:
             try:
-                res = await self.ctx.llm.generate(prompt=prompt, temperature=0.85, max_tokens=100)
+                res = await self.ctx.llm.generate(
+                    prompt=prompt,
+                    task_name="replyer",
+                    temperature=0.85,
+                    max_tokens=800,
+                )
                 if isinstance(res, dict) and res.get("response"):
                     return str(res["response"]).strip()
             except Exception as e:

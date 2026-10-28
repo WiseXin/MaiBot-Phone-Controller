@@ -81,7 +81,7 @@ class DeviceSection(PluginConfigBase):
         json_schema_extra={
             "label": "自动连接主机 IP",
             "hint": "受控手机无线调试 IP（支持 Tailscale 专网 100.x.x.x、局域网 IP 或留空）",
-            "placeholder": "例如 100.82.29.119 或 192.168.1.100",
+            "placeholder": "例如 100.64.0.1 或 192.168.1.100",
         },
     )
     default_port: int = Field(
@@ -99,7 +99,7 @@ class DeviceSection(PluginConfigBase):
         json_schema_extra={
             "label": "【核心安全项】主人账号 ID",
             "hint": "⚠️必填项：允许控制手机的主人账号（QQ 号或 Discord 用户数字 ID，多个用英文逗号隔开），留空默认拦截所有操作以保安全！",
-            "placeholder": "例如 489618891, 1563093479125688342",
+            "placeholder": "例如 12345678, 123456789012345678",
         },
     )
     auto_send_screenshot: bool = Field(

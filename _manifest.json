@@ -34,7 +34,8 @@
   "capabilities": [
     "send.text",
     "send.image",
-    "llm.generate"
+    "llm.generate",
+    "chat.get_stream_by_user_id"
   ],
   "i18n": {
     "default_locale": "zh-CN",

@@ -235,6 +235,26 @@ class SlackerEngine:
                 ):
                     logger.warning("自定义 LLM URL 命中私网/保留/回环 IP 拦截: %s (解析为 %s)", url, ip)
                     return False
+            else:
+                # 3. 对域名执行实际 DNS 解析，防范 DNS Rebinding 将公网域名动态指向私网或回环地址
+                try:
+                    addr_info = socket.getaddrinfo(hostname, None)
+                    for item in addr_info:
+                        resolved_ip_str = item[4][0]
+                        res_ip = ipaddress.ip_address(resolved_ip_str)
+                        if (
+                            res_ip.is_private
+                            or res_ip.is_loopback
+                            or res_ip.is_link_local
+                            or res_ip.is_reserved
+                            or res_ip.is_unspecified
+                            or res_ip.is_multicast
+                        ):
+                            logger.warning("自定义 LLM 域名 DNS 解析为私网/回环地址，安全拦截: %s -> %s", url, res_ip)
+                            return False
+                except Exception as dns_err:
+                    logger.warning("自定义 LLM URL DNS 解析失败拦截: %s (%s)", url, dns_err)
+                    return False
 
             return True
         except Exception as e:
@@ -285,11 +305,12 @@ class SlackerEngine:
         prompt = (
             f"你是小蓝，一个真实、温和随性、爱玩单机游戏的年轻女生。你刚刚在手机【{display_name}】刷到了一个很显眼的帖子/视频：\n"
             f"标题是：《{best_title}》{topics_ctx}\n"
-            "现在你截了一张图发给老大（你的好友/主人）。请用非常简短的一句话（10~25个字），像年轻女生日常在微信打字聊天一样随口跟他说一句，把这张图分享给他。\n"
+            "现在你截了一张图发给老大（你的好友/主人）。请用非常自然通顺的一句话（15~35个字），像年轻女生日常在微信打字聊天一样随口跟他说一句，把这张图分享给他。\n"
             "要求：\n"
-            "1. 极其自然随性，就像你刚刚刷到了随手扔给他看一样。\n"
-            "2. 严禁出现'报告老大'、'摸鱼巡航'、'热门内容'、'抓到'、'为您汇报'等任何机械、客服、机器人报告腔词汇！\n"
-            "3. 直接输出你要打出的那一句话，不要包含引号、前后缀解释。"
+            "1. 必须是一句完整的聊天交流话语，说清楚这张图有什么看点或好笑的（绝对不能只输出两三个字或只蹦一个名词短语！要有交流感）。\n"
+            "2. 极其自然随性，就像你刚刚刷到了随手扔给他看一样。\n"
+            "3. 严禁出现'报告老大'、'摸鱼巡航'、'热门内容'、'抓到'、'为您汇报'等任何机械、客服、机器人报告腔词汇！\n"
+            "4. 直接输出你要打出的那一句话，不要包含引号、前后缀解释。"
         )
 
         # 1. 优先通过传入的宿主 LLM 生成
@@ -298,7 +319,8 @@ class SlackerEngine:
                 res = await llm_caller(prompt)
                 if res and isinstance(res, str) and res.strip():
                     cleaned = res.strip().strip('"\'''“”')
-                    if cleaned:
+                    # 至少8个字且成句，防止大模型抽风只输出两三个字的名词短语
+                    if len(cleaned) >= 8:
                         return cleaned
             except Exception as e:
                 logger.debug("通过上下文 LLM 生成摸鱼吐槽异常: %s", e)
@@ -315,12 +337,18 @@ class SlackerEngine:
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {custom_llm_key}",
             }
+            class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    logger.warning("自定义 LLM 请求被重定向到 %s，安全策略拒绝跟随", newurl)
+                    return None
+
             try:
                 data_bytes = json.dumps(payload).encode("utf-8")
                 req = urllib.request.Request(custom_llm_url, data=data_bytes, headers=headers)
                 loop = asyncio.get_running_loop()
                 def _call():
-                    with urllib.request.urlopen(req, timeout=4.0) as resp:
+                    opener = urllib.request.build_opener(_NoRedirectHandler)
+                    with opener.open(req, timeout=4.0) as resp:
                         data = json.loads(resp.read().decode("utf-8"))
                         return data["choices"][0]["message"]["content"].strip()
                 comment = await loop.run_in_executor(None, _call)
