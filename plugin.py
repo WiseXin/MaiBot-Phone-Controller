@@ -230,24 +230,39 @@ class PhoneControllerPlugin(MaiBotPlugin):
                 await asyncio.sleep(600)
 
     def _resolve_owner_notification_streams(self) -> Tuple[Optional[str], Optional[str]]:
-        """智能解析摸鱼通报会话流 (支持直接按 QQ 号反查、显式 stream_id 或从 owner_qq 自动推导)"""
+        """智能解析摸鱼通报会话流 (支持直接按机器人QQ号、主人QQ号或显式 stream_id 智能路由)"""
         cfg: PhoneControllerConfig = self.config
         target = cfg.slack_off.notify_stream_id.strip()
         fallback = getattr(cfg.slack_off, "fallback_stream_id", "").strip()
 
-        # 如果 target 是纯数字 QQ 号，或者 target 为空但配置了 owner_qq
-        target_qq = ""
-        if target.isdigit():
-            target_qq = target
-        elif not target:
-            for part in cfg.device.owner_qq.replace("，", ",").split(","):
-                p = part.strip()
-                if p.isdigit():
-                    target_qq = p
-                    break
+        # 解析主人的 QQ 号（作为消息接收者）
+        owner_qq = "489618891"
+        for part in cfg.device.owner_qq.replace("，", ",").split(","):
+            p = part.strip()
+            if p.isdigit():
+                owner_qq = p
+                break
 
-        if target_qq:
-            official_stream, napcat_stream = self._lookup_sessions_by_qq(target_qq)
+        # 针对纯数字 QQ 号（机器人QQ号 或 主人QQ号）做多维度语义识别
+        if target.isdigit():
+            # 1. 如果用户指定的是官方机器人QQ号/ID（如 4019687781 或 5983296798483883357）
+            if target in ("4019687781", "5983296798483883357"):
+                official_stream, napcat_stream = self._lookup_sessions_by_qq(owner_qq)
+                return (official_stream or self._last_owner_stream_id), (napcat_stream or fallback)
+            # 2. 如果用户指定的是小号 NapCat QQ号（3131124785）
+            elif target == "3131124785":
+                official_stream, napcat_stream = self._lookup_sessions_by_qq(owner_qq)
+                return (napcat_stream or self._last_owner_stream_id), (official_stream or fallback)
+            # 3. 如果用户填的是主人的 QQ 号（如 489618891）
+            else:
+                official_stream, napcat_stream = self._lookup_sessions_by_qq(target)
+                final_target = official_stream or napcat_stream or self._last_owner_stream_id
+                final_fallback = napcat_stream if (official_stream and napcat_stream != official_stream) else fallback
+                return final_target, final_fallback
+
+        elif not target:
+            # 留空：自动取主人 QQ 号走双通道（官方主，小号备）
+            official_stream, napcat_stream = self._lookup_sessions_by_qq(owner_qq)
             final_target = official_stream or napcat_stream or self._last_owner_stream_id
             final_fallback = napcat_stream if (official_stream and napcat_stream != official_stream) else fallback
             return final_target, final_fallback
