@@ -25,6 +25,8 @@ SLACK_APPS = {
     "知乎": {"pkg": "com.zhihu.android", "name": "知乎", "keywords": ["回答", "赞同", "关注", "问题", "热榜"]},
     "微博": {"pkg": "com.sina.weibo", "name": "微博", "keywords": ["热搜", "超话", "微博", "转发", "评论"]},
     "小红书": {"pkg": "com.xingin.xhs", "name": "小红书", "keywords": ["笔记", "点赞", "收藏", "博主"]},
+    "抖音": {"pkg": "com.ss.android.ugc.aweme", "name": "抖音", "keywords": ["视频", "点赞", "关注", "评论", "分享", "音乐"]},
+    "douyin": {"pkg": "com.ss.android.ugc.aweme", "name": "抖音", "keywords": ["视频", "点赞", "关注", "评论", "分享", "音乐"]},
     "网易云音乐": {"pkg": "com.netease.cloudmusic", "name": "网易云音乐", "keywords": ["播放", "歌单", "乐评", "推荐"]},
 }
 

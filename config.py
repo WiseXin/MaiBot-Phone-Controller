@@ -89,7 +89,7 @@ class SlackOffSection(PluginConfigBase):
         description="摸鱼完毕后是否自动按电源键锁屏灭屏，节省手机电量",
     )
     preferred_apps: str = Field(
-        default="b站,知乎,微博,小红书",
+        default="b站,知乎,小红书,抖音",
         description="麦麦摸鱼爱逛的应用名称（逗号分隔）",
     )
     share_interesting_finds: bool = Field(
@@ -106,7 +106,11 @@ class SlackOffSection(PluginConfigBase):
     )
     notify_stream_id: str = Field(
         default="",
-        description="自动摸鱼时分享截图的目标 stream_id（留空自动使用主人最近私聊窗口）",
+        description="自动摸鱼时主通知会话 stream_id（留空自动使用主人最近私聊窗口）",
+    )
+    fallback_stream_id: str = Field(
+        default="",
+        description="备用通知会话 stream_id（当主通知窗口发送失败时自动降级尝试）",
     )
     custom_llm_url: str = Field(
         default="",

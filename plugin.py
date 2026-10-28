@@ -158,19 +158,44 @@ class PhoneControllerPlugin(MaiBotPlugin):
                         logger.info("【数字生命】麦麦闲来无事，自主拿起手机去刷【%s】啦！", target_app)
 
                         target_stream = cfg.slack_off.notify_stream_id.strip() or self._last_owner_stream_id
+                        fallback_stream = getattr(cfg.slack_off, "fallback_stream_id", "").strip()
+
+                        async def _send_with_fallback(text: Optional[str] = None, img_b64: Optional[str] = None) -> bool:
+                            candidates = [s for s in (target_stream, fallback_stream) if s]
+                            if not candidates:
+                                logger.debug("未配置摸鱼通知会话且无活跃私聊记录，静默跳过分享")
+                                return False
+
+                            for s in candidates:
+                                try:
+                                    success = True
+                                    if text:
+                                        res = await self.ctx.send.text(text, s)
+                                        if isinstance(res, bool) and not res:
+                                            success = False
+                                    if success and img_b64:
+                                        res = await self.ctx.send.image(img_b64, s)
+                                        if isinstance(res, bool) and not res:
+                                            success = False
+                                    if success:
+                                        logger.info("摸鱼成果已成功发送到会话: %s", s)
+                                        return True
+                                    logger.warning("摸鱼发送到会话 %s 未成功，尝试备用会话...", s)
+                                except Exception as err:
+                                    logger.warning("摸鱼发送到会话 %s 抛出异常: %s，尝试备用...", s, err)
+                            return False
 
                         async def _auto_share(img_path: str, caption: str):
-                            if target_stream and cfg.slack_off.share_interesting_finds:
+                            if cfg.slack_off.share_interesting_finds:
                                 try:
-                                    await self.ctx.send.text(caption, target_stream)
                                     with open(img_path, "rb") as f:
                                         img_b64 = base64.b64encode(f.read()).decode("utf-8")
-                                    await self.ctx.send.image(img_b64, target_stream)
+                                    await _send_with_fallback(text=caption, img_b64=img_b64)
                                 except Exception as err:
                                     logger.warning("摸鱼主动出站消息发送失败: %s", err)
 
                         # 执行自主摸鱼
-                        await self.slacker.run_slacking_session(
+                        res = await self.slacker.run_slacking_session(
                             app_name=target_app,
                             duration_seconds=cfg.slack_off.session_duration_seconds,
                             interval_min=cfg.slack_off.swipe_interval_min,
@@ -180,6 +205,12 @@ class PhoneControllerPlugin(MaiBotPlugin):
                             custom_llm_key=cfg.slack_off.custom_llm_key,
                             custom_llm_model=cfg.slack_off.custom_llm_model,
                         )
+
+                        # 若摸鱼期间未触发截图分享，但会话圆满结束，向主人发一条简短打卡总结
+                        if res and res.get("success") and not res.get("snapshots") and cfg.slack_off.share_interesting_finds:
+                            summary_text = res.get("message")
+                            if summary_text:
+                                await _send_with_fallback(text=summary_text)
 
                         # 摸鱼完毕自动灭屏锁屏
                         if cfg.slack_off.lock_screen_after_slack:
