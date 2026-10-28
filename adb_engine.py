@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import time
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional, Tuple
@@ -229,7 +230,7 @@ class AdbEngine:
         先在手机端写 /sdcard/_screen_snap.png 然后 pull 拉取，比 exec-out 跨网管道稳定快速 4 倍以上。
         """
         remote_tmp = "/sdcard/_screen_snap.png"
-        local_tmp = f"/tmp/_snap_{int(time.time() * 1000)}.png"
+        local_tmp = os.path.join(tempfile.gettempdir(), f"_snap_{int(time.time() * 1000)}.png")
         try:
             ok, err = await self.run_shell(f"screencap -p {remote_tmp}", timeout=10.0)
             if not ok:
