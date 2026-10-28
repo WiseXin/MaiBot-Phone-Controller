@@ -157,8 +157,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
                         target_app = random.choice(apps) if apps else "b站"
                         logger.info("【数字生命】麦麦闲来无事，自主拿起手机去刷【%s】啦！", target_app)
 
-                        target_stream = cfg.slack_off.notify_stream_id.strip() or self._last_owner_stream_id
-                        fallback_stream = getattr(cfg.slack_off, "fallback_stream_id", "").strip()
+                        target_stream, fallback_stream = self._resolve_owner_notification_streams()
 
                         async def _send_with_fallback(text: Optional[str] = None, img_b64: Optional[str] = None) -> bool:
                             candidates = [s for s in (target_stream, fallback_stream) if s]
@@ -229,6 +228,63 @@ class PhoneControllerPlugin(MaiBotPlugin):
             except Exception as e:
                 logger.error("自动摸鱼循环异常: %s", e)
                 await asyncio.sleep(600)
+
+    def _resolve_owner_notification_streams(self) -> Tuple[Optional[str], Optional[str]]:
+        """智能解析摸鱼通报会话流 (支持直接按 QQ 号反查、显式 stream_id 或从 owner_qq 自动推导)"""
+        cfg: PhoneControllerConfig = self.config
+        target = cfg.slack_off.notify_stream_id.strip()
+        fallback = getattr(cfg.slack_off, "fallback_stream_id", "").strip()
+
+        # 如果 target 是纯数字 QQ 号，或者 target 为空但配置了 owner_qq
+        target_qq = ""
+        if target.isdigit():
+            target_qq = target
+        elif not target:
+            for part in cfg.device.owner_qq.replace("，", ",").split(","):
+                p = part.strip()
+                if p.isdigit():
+                    target_qq = p
+                    break
+
+        if target_qq:
+            official_stream, napcat_stream = self._lookup_sessions_by_qq(target_qq)
+            final_target = official_stream or napcat_stream or self._last_owner_stream_id
+            final_fallback = napcat_stream if (official_stream and napcat_stream != official_stream) else fallback
+            return final_target, final_fallback
+
+        return target or self._last_owner_stream_id, fallback
+
+    def _lookup_sessions_by_qq(self, qq_number: str) -> Tuple[Optional[str], Optional[str]]:
+        """从 MaiBot 数据库自动反查指定 QQ 号的官方机器人私聊会话与小号私聊会话"""
+        official_stream = None
+        napcat_stream = None
+        try:
+            import sqlite3
+            from pathlib import Path
+            db_candidates = [
+                self.ctx.paths.data_dir.parent / "MaiBot.db",
+                Path("/opt/maibot/instance/data/MaiBot.db"),
+            ]
+            db_path = next((p for p in db_candidates if p.exists()), None)
+            if db_path is not None:
+                with sqlite3.connect(db_path) as conn:
+                    c = conn.cursor()
+                    r1 = c.execute(
+                        "SELECT session_id FROM chat_sessions WHERE platform='qq' AND user_id=? AND group_id IS NULL AND account_id != '3131124785' ORDER BY id DESC LIMIT 1",
+                        (str(qq_number),)
+                    ).fetchone()
+                    if r1:
+                        official_stream = r1[0]
+
+                    r2 = c.execute(
+                        "SELECT session_id FROM chat_sessions WHERE platform='qq' AND user_id=? AND group_id IS NULL AND account_id = '3131124785' ORDER BY id DESC LIMIT 1",
+                        (str(qq_number),)
+                    ).fetchone()
+                    if r2:
+                        napcat_stream = r2[0]
+        except Exception as e:
+            logger.warning("通过 QQ 号自动反查私聊会话异常: %s", e)
+        return official_stream, napcat_stream
 
     # -------------------------------------------------------------------------
     # 安全防御辅助
