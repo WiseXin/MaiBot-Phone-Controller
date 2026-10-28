@@ -246,20 +246,20 @@ class PhoneControllerPlugin(MaiBotPlugin):
 
         # 针对纯数字 QQ 号（机器人QQ号 或 主人QQ号）做多维度语义识别
         if target.isdigit():
-            # 1. 如果用户指定的是官方机器人QQ号/ID（如 4019687781 或 5983296798483883357）
-            if target in ("4019687781", "5983296798483883357"):
-                official_stream, napcat_stream = self._lookup_sessions_by_qq(owner_qq)
-                return (official_stream or self._last_owner_stream_id), (napcat_stream or fallback)
-            # 2. 如果用户指定的是小号 NapCat QQ号（3131124785）
-            elif target == "3131124785":
+            # 1. 如果用户指定的是小号 NapCat QQ号（3131124785）
+            if target == "3131124785":
                 official_stream, napcat_stream = self._lookup_sessions_by_qq(owner_qq)
                 return (napcat_stream or self._last_owner_stream_id), (official_stream or fallback)
-            # 3. 如果用户填的是主人的 QQ 号（如 489618891）
-            else:
+            # 2. 如果用户填的是主人的 QQ 号（如 489618891）
+            elif target == owner_qq:
                 official_stream, napcat_stream = self._lookup_sessions_by_qq(target)
                 final_target = official_stream or napcat_stream or self._last_owner_stream_id
                 final_fallback = napcat_stream if (official_stream and napcat_stream != official_stream) else fallback
                 return final_target, final_fallback
+            # 3. 如果用户指定的是官方机器人专属QQ号（如主号机器人 4015563329、4019687781 等）
+            else:
+                official_stream, napcat_stream = self._lookup_sessions_by_qq(owner_qq)
+                return (official_stream or self._last_owner_stream_id), (napcat_stream or fallback)
 
         elif not target:
             # 留空：自动取主人 QQ 号走双通道（官方主，小号备）
