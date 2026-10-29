@@ -138,6 +138,25 @@ custom_llm_model = "gpt-3.5-turbo"
 
 ---
 
+## 📝 Changelog
+
+### 🚀 v1.1.2 (2026-10-29) - Clean Account Routing & Primary/Fallback Decoupling
+* 🎯 **Direct Account ID Input**: Both `notify_stream_id` and `fallback_stream_id` now directly accept User QQ number, Bot dedicated QQ number, or Discord User ID, completely eliminating complex 32-character session hashes.
+* 🛡 **Strict Primary/Fallback Isolation**: Slacking finds are always sent to the primary target first. Once delivered, the fallback channel is never touched. Fallback is activated solely when all primary links fail.
+* 🧼 **Zero Sensitive Information**: Fully sanitized code and examples adhering strictly to open-source marketplace standards.
+
+### 🎨 v1.1.1 (2026-10-28) - Center-Focused Vision Alignment & 4-App Slacking
+* 👁 **Golden Center-Y Algorithm**: Geometric distance sorting guarantees 100% focus on center cards, eliminating image-text mismatch.
+* 📱 **4 Major Social Apps**: Added native support for Douyin (TikTok), Bilibili, Zhihu, and Xiaohongshu with ad-skipping and redirect guard.
+* ⚡ **High-Speed Pull Protocol**: On-device capture plus chunked ADB pull slashes screenshot transfer latency to 5-7 seconds.
+* 🌐 **Comprehensive WebUI Localization**: Full Chinese labels, hints, and placeholders across all configuration fields.
+
+### 🌟 v1.1.0 (2026-10-27) - Official Marketplace Release
+* 🏪 **Official Approval**: Merged into the [Official MaiBot Plugin Repository](https://plugins.maibot.chat/).
+* 🔀 **Alias Switching & Chinese Input**: Seamless voice/text device switching and native Chinese ADBKeyboard protocol.
+
+---
+
 ## 📄 License
 
 This project is licensed under the [MIT License](./LICENSE).
