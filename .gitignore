@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 config.toml
+runtime_state.json
 .venv/
 venv/
 *.tmp

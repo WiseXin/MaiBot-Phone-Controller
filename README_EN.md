@@ -102,8 +102,8 @@
 ```toml
 [plugin]
 name = "phone_controller"
-version = "1.1.1"
-config_version = "1.1.1"
+version = "1.1.2"
+config_version = "1.1.2"
 enabled = true
 
 [device]

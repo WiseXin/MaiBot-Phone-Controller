@@ -551,19 +551,16 @@ class PhoneControllerPlugin(MaiBotPlugin):
             logger.debug("清理临时截图文件忽略异常: %s", e)
 
     def _get_state_file_path(self) -> Path:
-        """获取插件持久化运行时状态文件路径 (健壮支持绝对路径)"""
-        candidates = []
+        """获取插件持久化运行时状态文件路径 (规范、优雅且跨平台)"""
+        candidates: List[Path] = []
         try:
             d = Path(self.ctx.paths.data_dir)
-            candidates.append(Path("/opt/maibot/instance") / d)
-            candidates.append(d if d.is_absolute() else Path.cwd() / d)
+            candidates.append(d if d.is_absolute() else (Path.cwd() / d).resolve())
         except Exception:
             pass
 
-        candidates.extend([
-            Path("/opt/maibot/instance/data/plugins/WiseXin.phone-controller"),
-            Path.cwd() / "data" / "plugins" / "WiseXin.phone-controller",
-        ])
+        # 备用标准相对路径
+        candidates.append((Path.cwd() / "data" / "plugins" / "WiseXin.phone-controller").resolve())
 
         # 优先寻找已经存在真实状态文件的路径
         for c in candidates:
@@ -579,8 +576,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
             except Exception:
                 continue
 
-        fallback = Path.cwd() / "runtime_state.json"
-        return fallback
+        return (Path.cwd() / "runtime_state.json").resolve()
 
     def _load_last_slack_time(self) -> float:
         """读取上一次摸鱼完成的时间戳 (防重启后过早摸鱼)"""
