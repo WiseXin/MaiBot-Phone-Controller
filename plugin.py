@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import logging
 import os
+from pathlib import Path
 import random
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -129,8 +130,6 @@ class PhoneControllerPlugin(MaiBotPlugin):
     async def _auto_slacking_loop(self) -> None:
         """闲时自主摸鱼巡航主循环"""
         logger.info("闲时自主摸鱼巡航协程已启动")
-        # 首次启动先随机缓冲 300 ~ 600 秒
-        await asyncio.sleep(random.randint(300, 600))
 
         while True:
             try:
@@ -144,12 +143,31 @@ class PhoneControllerPlugin(MaiBotPlugin):
                     await asyncio.sleep(1800)
                     continue
 
-                # 1. 计算下一次摸鱼随机间隔
+                # 1. 计算配置要求的随机摸鱼间隔 (秒)
                 min_sec = max(1800, int(cfg.slack_off.interval_hours_min * 3600))
                 max_sec = max(min_sec, int(cfg.slack_off.interval_hours_max * 3600))
-                sleep_sec = random.randint(min_sec, max_sec)
+                target_interval = random.randint(min_sec, max_sec)
 
-                # 2. 检查作息时间与手机状态
+                # 2. 检查距离上一次摸鱼过去了多久 (持久化校准，彻底防止重启与配置重载后频繁摸鱼抢跑)
+                last_slack_ts = self._load_last_slack_time()
+                now = time.time()
+                if last_slack_ts > 0:
+                    elapsed = now - last_slack_ts
+                    if elapsed < target_interval:
+                        remaining_sleep = target_interval - elapsed
+                        logger.info(
+                            "【数字生命】距离上次摸鱼仅过去 %.1f 分钟，距下一次摸鱼仍需休眠 %.1f 小时，保持静默休眠...",
+                            elapsed / 60.0,
+                            remaining_sleep / 3600.0,
+                        )
+                        await asyncio.sleep(remaining_sleep)
+                        continue
+                else:
+                    # 全新初次启动且无历史记录：先进行 600~1200 秒的开机静默缓冲
+                    logger.info("【数字生命】检测到无历史摸鱼记录，执行初次启动静默缓冲...")
+                    await asyncio.sleep(random.randint(600, 1200))
+
+                # 3. 检查作息时间与手机状态
                 if self._is_in_active_hours(cfg.slack_off.active_time_range):
                     status = await self.adb.get_status()
                     if status.get("connected"):
@@ -273,12 +291,18 @@ class PhoneControllerPlugin(MaiBotPlugin):
                         if cfg.slack_off.lock_screen_after_slack:
                             await asyncio.sleep(1.0)
                             await self.adb.press_key("power")
+
+                        # 记录并持久化本次摸鱼完成时间戳 (防服务重启后过早再次摸鱼)
+                        self._save_last_slack_time(time.time())
                     else:
                         logger.debug("受控手机未连接，跳过本次自动摸鱼")
                 else:
                     logger.debug("当前处于免打扰时段，麦麦正在安睡，不去玩手机")
 
-                await asyncio.sleep(sleep_sec)
+                # 本轮周期结束，计算并休眠下一个完整随机周期
+                next_sleep = random.randint(min_sec, max_sec)
+                logger.info("本轮摸鱼巡航结束，进入深度休眠，下次巡航约在 %.1f 小时后", next_sleep / 3600.0)
+                await asyncio.sleep(next_sleep)
 
             except asyncio.CancelledError:
                 logger.info("自动摸鱼调度任务已正常停止")
@@ -525,6 +549,65 @@ class PhoneControllerPlugin(MaiBotPlugin):
                         pass
         except Exception as e:
             logger.debug("清理临时截图文件忽略异常: %s", e)
+
+    def _get_state_file_path(self) -> Path:
+        """获取插件持久化运行时状态文件路径 (健壮支持绝对路径)"""
+        candidates = []
+        try:
+            d = Path(self.ctx.paths.data_dir)
+            candidates.append(Path("/opt/maibot/instance") / d)
+            candidates.append(d if d.is_absolute() else Path.cwd() / d)
+        except Exception:
+            pass
+
+        candidates.extend([
+            Path("/opt/maibot/instance/data/plugins/WiseXin.phone-controller"),
+            Path.cwd() / "data" / "plugins" / "WiseXin.phone-controller",
+        ])
+
+        # 优先寻找已经存在真实状态文件的路径
+        for c in candidates:
+            p = c / "runtime_state.json"
+            if p.exists():
+                return p
+
+        # 若均不存在，在首个可写候选目录下创建并返回
+        for c in candidates:
+            try:
+                c.mkdir(parents=True, exist_ok=True)
+                return c / "runtime_state.json"
+            except Exception:
+                continue
+
+        fallback = Path.cwd() / "runtime_state.json"
+        return fallback
+
+    def _load_last_slack_time(self) -> float:
+        """读取上一次摸鱼完成的时间戳 (防重启后过早摸鱼)"""
+        try:
+            p = self._get_state_file_path()
+            logger.info("【状态加载】检查摸鱼历史记录文件: %s (存在=%s)", p, p.exists())
+            if p.exists():
+                with open(p, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    val = float(data.get("last_slack_timestamp", 0.0))
+                    logger.info("【状态加载】成功读取上次摸鱼时间: %s (ts=%.1f)", data.get("last_slack_datetime"), val)
+                    return val
+        except Exception as e:
+            logger.warning("读取上次摸鱼时间戳异常: %s", e)
+        return 0.0
+
+    def _save_last_slack_time(self, ts: float) -> None:
+        """持久化保存上一次摸鱼完成的时间戳"""
+        try:
+            p = self._get_state_file_path()
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump({
+                    "last_slack_timestamp": ts,
+                    "last_slack_datetime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+                }, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.debug("保存上次摸鱼时间戳异常: %s", e)
 
     def _resolve_target(self, target: str, port: Optional[int] = None) -> Tuple[str, int, str]:
         """解析设备别名（如'小米'、'vivo'）或 IP:端口"""
