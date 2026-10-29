@@ -157,7 +157,22 @@ class PhoneControllerPlugin(MaiBotPlugin):
                         target_app = random.choice(apps) if apps else "b站"
                         logger.info("【数字生命】麦麦闲来无事，自主拿起手机去刷【%s】啦！", target_app)
 
-                        primary_streams, fallback_streams = await self._resolve_owner_notification_streams()
+                        # 解析主要通知目标与备用通知目标 (支持 QQ 号、机器人 QQ 号、Discord ID)
+                        owner_accounts = [
+                            p.strip()
+                            for p in cfg.device.owner_qq.replace("，", ",").split(",")
+                            if p.strip()
+                        ]
+                        primary_target = cfg.slack_off.notify_stream_id.strip()
+                        if not primary_target and owner_accounts:
+                            primary_target = owner_accounts[0]
+
+                        primary_streams = await self._resolve_streams_for_target(primary_target, owner_accounts) if primary_target else []
+                        if not primary_streams and self._last_owner_stream_id:
+                            primary_streams = [self._last_owner_stream_id]
+
+                        fallback_target = getattr(cfg.slack_off, "fallback_stream_id", "").strip()
+                        fallback_streams = await self._resolve_streams_for_target(fallback_target, owner_accounts) if fallback_target else []
 
                         async def _send_with_fallback(text: Optional[str] = None, img_b64: Optional[str] = None) -> bool:
                             if not primary_streams and not fallback_streams:
@@ -185,7 +200,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
 
                             # 2. 只有当主会话通道所有链路均不通时，才采用备用通道！
                             if fallback_streams:
-                                logger.warning("⚠️ 主会话通道不通或发送失败，启动备用通道容灾发送...")
+                                logger.warning("⚠️ 主会话通道不通或发送失败，采用备用通道容灾发送...")
                                 for s in fallback_streams:
                                     try:
                                         success = True
@@ -204,7 +219,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
                                     except Exception as err:
                                         logger.warning("备用通道会话 %s 抛出异常: %s", s, err)
                             else:
-                                logger.warning("主会话通道发送失败，且未配置备用通道")
+                                logger.warning("主会话通道发送失败，且未配置有效备用通道")
 
                             return False
 
@@ -269,62 +284,30 @@ class PhoneControllerPlugin(MaiBotPlugin):
                 logger.error("自动摸鱼循环异常: %s", e)
                 await asyncio.sleep(600)
 
-    async def _resolve_owner_notification_streams(self) -> Tuple[List[str], List[str]]:
-        """智能解析主通知通道与备用通知通道对应的私聊会话流列表。
+    async def _resolve_streams_for_target(self, target_id: str, owner_accounts: Optional[List[str]] = None) -> List[str]:
+        """根据配置的 ID 解析该目标对应的私聊会话流列表。
 
-        用户配置中直接填写 QQ 号或 Discord 用户 ID，绝不需要填写底层 32 位会话 ID。
-        主通道优先使用，只有主通道所有可用链路均不通时才切换至备用通道。
+        目标 ID 可以是：
+        1. 用户的 QQ 号（主人的 QQ）
+        2. 机器人的专属 QQ 号（例如官方机器人号或小号机器人号）
+        3. 用户的 Discord ID
+        （兼容底层 32 位十六进制会话 ID）
         """
-        cfg: PhoneControllerConfig = self.config
-        primary_target = cfg.slack_off.notify_stream_id.strip()
-        fallback_target = getattr(cfg.slack_off, "fallback_stream_id", "").strip()
-
-        # 提取配置的主人账号列表
-        owner_accounts: List[str] = [
-            p.strip()
-            for p in cfg.device.owner_qq.replace("，", ",").split(",")
-            if p.strip()
-        ]
-
-        # 1. 若主通道留空，默认以主人列表中的首个账号作为主目标
-        if not primary_target and owner_accounts:
-            primary_target = owner_accounts[0]
-
-        # 2. 解析主通道会话列表
-        primary_streams = await self._resolve_streams_by_account(primary_target) if primary_target else []
-
-        # 3. 解析备用通道会话列表 (仅当用户显式配置了 fallback_target 时解析，避免未经允许误串台)
-        fallback_streams: List[str] = []
-        if fallback_target:
-            fallback_streams = await self._resolve_streams_by_account(fallback_target)
-
-        # 兜底保底：如果主通道未解析到任何会话，尝试最近活跃的主人会话
-        if not primary_streams and self._last_owner_stream_id:
-            primary_streams = [self._last_owner_stream_id]
-
-        return primary_streams, fallback_streams
-
-    async def _resolve_streams_by_account(self, target_account: str) -> List[str]:
-        """根据用户填写的 QQ 号、Discord 用户 ID 或机器人账号解析出对应的私聊会话 ID 列表。
-
-        绝不需要用户填写 32 位底层会话 ID。
-        如果同一 QQ 用户存在多个会话（例如同时有官方机器人和小号），优先将连接更稳定的官方机器人排在首位。
-        """
-        target = str(target_account or "").strip()
-        if not target:
+        tid = str(target_id or "").strip()
+        if not tid:
             return []
 
-        # 兼容性防御：如果极端情况下用户误填了 32 位十六进制会话 ID
-        if len(target) == 32 and not target.isdigit():
+        # 兼容性防御：如果极端情况下直接填写了 32 位十六进制会话 ID
+        if len(tid) == 32 and not tid.isdigit():
             try:
-                int(target, 16)
-                return [target]
+                int(tid, 16)
+                return [tid]
             except ValueError:
                 pass
 
-        matched_streams: List[Dict[str, Any]] = []
+        owners = owner_accounts or []
 
-        # 1. 尝试通过官方 SDK chat.get_private_streams API 获取所有私聊流
+        matched_streams: List[str] = []
         for plat in ("qq", "discord"):
             try:
                 res = await self.ctx.chat.get_private_streams(platform=plat)
@@ -334,64 +317,42 @@ class PhoneControllerPlugin(MaiBotPlugin):
                 elif isinstance(res, dict) and "streams" in res:
                     raw_streams = res.get("streams") or []
 
-                for s in raw_streams:
+                # 后建立的活跃会话排在前面优先尝试
+                for s in reversed(raw_streams):
                     if not isinstance(s, dict):
                         continue
-                    # 匹配 user_id（主人的 QQ 号或 Discord ID）或者 account_id（机器人的 QQ 号/ID）
                     u_id = str(s.get("user_id") or "").strip()
                     bot_acc = str(s.get("account_id") or "").strip()
-                    if u_id == target or bot_acc == target:
-                        matched_streams.append(s)
-            except Exception as e:
-                logger.debug("通过 get_private_streams 查询平台 %s 异常: %s", plat, e)
+                    sid = str(s.get("session_id") or s.get("stream_id") or "").strip()
 
-        # 2. 如果未在列表中匹配到，尝试使用 get_stream_by_user_id 单独查找
+                    if not sid or sid in matched_streams:
+                        continue
+
+                    # 格式 1 & 3：target_id 是用户自身账号 (如 QQ 号或 Discord 用户 ID)
+                    if u_id == tid:
+                        matched_streams.append(sid)
+                    # 格式 2：target_id 是机器人账号 (如机器人的专属 QQ 号)，且私聊对象为主人
+                    elif bot_acc == tid and (not owners or u_id in owners):
+                        matched_streams.append(sid)
+            except Exception as e:
+                logger.debug("获取平台 %s 私聊流异常: %s", plat, e)
+
+        # 兜底查找
         if not matched_streams:
             for plat in ("qq", "discord"):
                 try:
-                    res = await self.ctx.chat.get_stream_by_user_id(user_id=target, platform=plat)
+                    res = await self.ctx.chat.get_stream_by_user_id(user_id=tid, platform=plat)
                     s_id = None
                     if isinstance(res, dict):
                         s_id = res.get("stream_id") or res.get("session_id")
                     elif res is not None:
                         s_id = getattr(res, "stream_id", None) or getattr(res, "session_id", None)
-                    if s_id:
-                        matched_streams.append({
-                            "session_id": str(s_id),
-                            "platform": plat,
-                            "user_id": target,
-                            "account_id": "",
-                        })
+                    if s_id and str(s_id) not in matched_streams:
+                        matched_streams.append(str(s_id))
                 except Exception as e:
-                    logger.debug("通过 get_stream_by_user_id 查询 %s 异常: %s", target, e)
+                    logger.debug("通过 get_stream_by_user_id 查询 %s 异常: %s", tid, e)
 
-        if not matched_streams:
-            return []
-
-        # 3. 核心排序策略：
-        # 对于 QQ 会话，官方机器人流（bot account != 3131124785 且不包含 napcat）排在首位，NapCat 小号排在后面
-        def _stream_priority(item: Dict[str, Any]) -> int:
-            plat = item.get("platform", "")
-            bot_acc = str(item.get("account_id") or "")
-            if plat == "qq":
-                # 官方机器人账号（非 3131124785 小号）最优先
-                if bot_acc and bot_acc != "3131124785":
-                    return 0
-                return 1
-            elif plat == "discord":
-                return 2
-            return 3
-
-        matched_streams.sort(key=_stream_priority)
-
-        # 去重提取 session_id
-        result_session_ids: List[str] = []
-        for s in matched_streams:
-            sid = str(s.get("session_id") or s.get("stream_id") or "").strip()
-            if sid and sid not in result_session_ids:
-                result_session_ids.append(sid)
-
-        return result_session_ids
+        return matched_streams
 
     # -------------------------------------------------------------------------
     # 安全防御辅助

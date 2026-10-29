@@ -282,9 +282,9 @@ notify_summary = false
 swipe_interval_min = 3.0
 swipe_interval_max = 7.0
 
-# 摸鱼主动分享目标（直接填 QQ 号或 Discord 用户 ID，优先使用该通道！切勿填 32 位会话 ID；留空默认取主人首个账号）
+# 摸鱼主动分享目标（可填 QQ 号、机器人的专属 QQ 号、或 Discord 用户 ID，优先使用该通道！留空默认取主人首个账号）
 notify_stream_id = ""
-fallback_stream_id = ""                         # 备用降级通知通道（可选：填备用 QQ 号或 Discord 用户 ID，仅主通道完全不通时容灾发送）
+fallback_stream_id = ""                         # 备用容灾通知目标（可选：填备用 QQ 号、备用机器人 QQ 号、或 Discord ID，仅主通道不通时发送）
 
 # 可选高级项：第三方自定义 LLM 端点（留空默认由麦麦内置大模型驱动灵动吐槽，无需配置）
 custom_llm_url = ""

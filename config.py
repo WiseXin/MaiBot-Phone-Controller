@@ -242,20 +242,20 @@ class SlackOffSection(PluginConfigBase):
     )
     notify_stream_id: str = Field(
         default="",
-        description="主要通知目标（直接填写主人的 QQ 号或 Discord 用户 ID。优先使用该通道；留空默认使用主人首个账号）",
+        description="主要通知目标（支持填写主人的 QQ 号、机器人的专属 QQ 号、或 Discord 用户 ID。优先使用该通道）",
         json_schema_extra={
-            "label": "主要通知目标 (QQ号/Discord号)",
-            "hint": "主要通知通道。直接填主人的 QQ 号（如 123456789）或 Discord 用户 ID。优先使用该通道；留空默认使用 device.owner_qq 中的首个账号。切勿填写 32 位会话 ID。",
-            "placeholder": "填 QQ 号或 Discord 用户 ID，如 123456789",
+            "label": "主要通知目标 (QQ号/机器人QQ号/Discord ID)",
+            "hint": "主要通知通道。可填主人的 QQ 号、指定机器人的专属 QQ 号、或 Discord 用户 ID。优先使用该通道；留空默认使用 device.owner_qq 中的首个账号。无需填写底层 32 位会话 ID。",
+            "placeholder": "填 QQ号、机器人QQ号 或 Discord ID",
         },
     )
     fallback_stream_id: str = Field(
         default="",
-        description="备用通知目标（可选，仅当主通道发送失败或不通时才会触发容灾发送。直接填备用 QQ 号或 Discord 用户 ID）",
+        description="备用通知目标（可选，仅当主通道发送失败或不通时才启用。支持填写备用 QQ 号、备用机器人 QQ 号、或 Discord ID）",
         json_schema_extra={
-            "label": "备用通知目标 (QQ号/Discord号)",
-            "hint": "备用通知通道。仅在主要通道发送失败或不通时才会触发容灾发送。直接填备用 QQ 号或 Discord 用户 ID，留空则不启用备用通道。切勿填写 32 位会话 ID。",
-            "placeholder": "可选：填备用 QQ 号或 Discord 用户 ID",
+            "label": "备用通知目标 (QQ号/机器人QQ号/Discord ID)",
+            "hint": "备用通知通道。仅当主通道发送失败或不通时才启用容灾。可填备用 QQ 号、备用机器人 QQ 号、或 Discord ID；留空则不启用备用。",
+            "placeholder": "可选：填备用 QQ号、机器人QQ号 或 Discord ID",
         },
     )
     custom_llm_url: str = Field(
