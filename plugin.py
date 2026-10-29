@@ -180,23 +180,26 @@ class PhoneControllerPlugin(MaiBotPlugin):
                                 return False
 
                             # 1. 优先使用主要通道发送
-                            for s in primary_streams:
-                                try:
-                                    success = True
-                                    if text:
-                                        res = await self.ctx.send.text(text, s)
-                                        if isinstance(res, bool) and not res:
-                                            success = False
-                                    if success and img_b64:
-                                        res = await self.ctx.send.image(img_b64, s)
-                                        if isinstance(res, bool) and not res:
-                                            success = False
-                                    if success:
-                                        logger.info("摸鱼成果已通过主通道成功发送到会话: %s", s)
-                                        return True
-                                    logger.warning("主通道会话 %s 发送未成功，尝试主通道下一可用链路...", s)
-                                except Exception as err:
-                                    logger.warning("主通道会话 %s 抛出异常: %s", s, err)
+                            if primary_streams:
+                                for s in primary_streams:
+                                    try:
+                                        success = True
+                                        if text:
+                                            res = await self.ctx.send.text(text, s)
+                                            if isinstance(res, bool) and not res:
+                                                success = False
+                                        if success and img_b64:
+                                            res = await self.ctx.send.image(img_b64, s)
+                                            if isinstance(res, bool) and not res:
+                                                success = False
+                                        if success:
+                                            logger.info("摸鱼成果已通过主通道成功发送到会话: %s", s)
+                                            return True
+                                        logger.warning("主通道会话 %s 发送未成功，尝试主通道下一可用链路...", s)
+                                    except Exception as err:
+                                        logger.warning("主通道会话 %s 抛出异常: %s", s, err)
+                            else:
+                                logger.warning("主要通知目标 [%s] 未能解析到有效私聊会话流，请确认账号是否正确或已开启私聊", primary_target)
 
                             # 2. 只有当主会话通道所有链路均不通时，才采用备用通道！
                             if fallback_streams:
@@ -336,6 +339,25 @@ class PhoneControllerPlugin(MaiBotPlugin):
                         matched_streams.append(sid)
             except Exception as e:
                 logger.debug("获取平台 %s 私聊流异常: %s", plat, e)
+
+        # 兼容性增强：若用户填入的是 QQ 开放平台分配的官方机器人展示号 (通常为 400/401 开头，如 4010000000)，
+        # 腾讯底层网关会将 Bot 转换为内部长整数 UID，此时寻找与主人绑定的官方机器人私聊
+        if not matched_streams and (tid.startswith("40") or tid.startswith("401")):
+            try:
+                res = await self.ctx.chat.get_private_streams(platform="qq")
+                raw_streams = res if isinstance(res, list) else (res.get("streams") if isinstance(res, dict) else [])
+                for s in (raw_streams or []):
+                    if not isinstance(s, dict):
+                        continue
+                    u_id = str(s.get("user_id") or "").strip()
+                    bot_acc = str(s.get("account_id") or "").strip()
+                    sid = str(s.get("session_id") or s.get("stream_id") or "").strip()
+                    # 匹配主人且 Bot 账号为官方长 UID (>10位)
+                    if sid and (not owners or u_id in owners) and len(bot_acc) > 10:
+                        if sid not in matched_streams:
+                            matched_streams.append(sid)
+            except Exception as e:
+                logger.debug("尝试对齐 QQ 官方机器人长 UID 会话异常: %s", e)
 
         # 兜底查找
         if not matched_streams:
