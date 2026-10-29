@@ -25,7 +25,7 @@ class PluginSection(PluginConfigBase):
         },
     )
     version: str = Field(
-        default="1.1.1",
+        default="1.1.2",
         description="插件版本",
         json_schema_extra={
             "label": "插件版本",
@@ -33,7 +33,7 @@ class PluginSection(PluginConfigBase):
         },
     )
     config_version: str = Field(
-        default="1.1.1",
+        default="1.1.2",
         description="配置版本(Runner 校验)",
         json_schema_extra={
             "label": "配置结构版本",
@@ -242,20 +242,20 @@ class SlackOffSection(PluginConfigBase):
     )
     notify_stream_id: str = Field(
         default="",
-        description="摸鱼主动分享目标（留空最推荐：自动定位主人私聊窗口并支持多通道主备降级；亦可直接填主人 QQ 号或机器人号）",
+        description="主要通知目标（直接填写主人的 QQ 号或 Discord 用户 ID。优先使用该通道；留空默认使用主人首个账号）",
         json_schema_extra={
-            "label": "摸鱼主通知通道",
-            "hint": "留空最推荐：系统全自动反查最近活跃的主人私聊通道，多机器人时自动实现主备降级！亦可直接填写主人 QQ 号或机器人号",
-            "placeholder": "留空自动推导，或填写QQ号/机器人号",
+            "label": "主要通知目标 (QQ号/Discord号)",
+            "hint": "主要通知通道。直接填主人的 QQ 号（如 123456789）或 Discord 用户 ID。优先使用该通道；留空默认使用 device.owner_qq 中的首个账号。切勿填写 32 位会话 ID。",
+            "placeholder": "填 QQ 号或 Discord 用户 ID，如 123456789",
         },
     )
     fallback_stream_id: str = Field(
         default="",
-        description="备用通知目标（可选，当主通道发送失败时自动降级；留空若存在多机器人通道会自动选路作为备用）",
+        description="备用通知目标（可选，仅当主通道发送失败或不通时才会触发容灾发送。直接填备用 QQ 号或 Discord 用户 ID）",
         json_schema_extra={
-            "label": "备用降级通知通道",
-            "hint": "可选：当主通道发送失败或网络波动时自动降级尝试；留空自动将另一机器人通道设为备用",
-            "placeholder": "留空自动将另一通道设为备用",
+            "label": "备用通知目标 (QQ号/Discord号)",
+            "hint": "备用通知通道。仅在主要通道发送失败或不通时才会触发容灾发送。直接填备用 QQ 号或 Discord 用户 ID，留空则不启用备用通道。切勿填写 32 位会话 ID。",
+            "placeholder": "可选：填备用 QQ 号或 Discord 用户 ID",
         },
     )
     custom_llm_url: str = Field(

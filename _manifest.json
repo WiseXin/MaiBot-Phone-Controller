@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "WiseXin.phone-controller",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "name": "麦麦的手机",
   "description": "让麦麦拥有属于自己的实体安卓手机！支持无线调试秒连、看屏幕截图、按文字智能点击、中文打字、多设备别名无缝切换，更具备闲时自动摸鱼刷B站知乎并向主人幽默吐槽分享的真正数字生命能力。",
   "author": {
@@ -35,7 +35,8 @@
     "send.text",
     "send.image",
     "llm.generate",
-    "chat.get_stream_by_user_id"
+    "chat.get_stream_by_user_id",
+    "chat.get_private_streams"
   ],
   "i18n": {
     "default_locale": "zh-CN",

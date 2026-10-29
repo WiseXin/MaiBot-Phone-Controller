@@ -157,15 +157,15 @@ class PhoneControllerPlugin(MaiBotPlugin):
                         target_app = random.choice(apps) if apps else "b站"
                         logger.info("【数字生命】麦麦闲来无事，自主拿起手机去刷【%s】啦！", target_app)
 
-                        target_stream, fallback_stream = await self._resolve_owner_notification_streams()
+                        primary_streams, fallback_streams = await self._resolve_owner_notification_streams()
 
                         async def _send_with_fallback(text: Optional[str] = None, img_b64: Optional[str] = None) -> bool:
-                            candidates = [s for s in (target_stream, fallback_stream) if s]
-                            if not candidates:
-                                logger.debug("未配置摸鱼通知会话且无活跃私聊记录，静默跳过分享")
+                            if not primary_streams and not fallback_streams:
+                                logger.debug("未配置摸鱼通知账号且无活跃私聊记录，静默跳过分享")
                                 return False
 
-                            for s in candidates:
+                            # 1. 优先使用主要通道发送
+                            for s in primary_streams:
                                 try:
                                     success = True
                                     if text:
@@ -177,11 +177,35 @@ class PhoneControllerPlugin(MaiBotPlugin):
                                         if isinstance(res, bool) and not res:
                                             success = False
                                     if success:
-                                        logger.info("摸鱼成果已成功发送到会话: %s", s)
+                                        logger.info("摸鱼成果已通过主通道成功发送到会话: %s", s)
                                         return True
-                                    logger.warning("摸鱼发送到会话 %s 未成功，尝试备用会话...", s)
+                                    logger.warning("主通道会话 %s 发送未成功，尝试主通道下一可用链路...", s)
                                 except Exception as err:
-                                    logger.warning("摸鱼发送到会话 %s 抛出异常: %s，尝试备用...", s, err)
+                                    logger.warning("主通道会话 %s 抛出异常: %s", s, err)
+
+                            # 2. 只有当主会话通道所有链路均不通时，才采用备用通道！
+                            if fallback_streams:
+                                logger.warning("⚠️ 主会话通道不通或发送失败，启动备用通道容灾发送...")
+                                for s in fallback_streams:
+                                    try:
+                                        success = True
+                                        if text:
+                                            res = await self.ctx.send.text(text, s)
+                                            if isinstance(res, bool) and not res:
+                                                success = False
+                                        if success and img_b64:
+                                            res = await self.ctx.send.image(img_b64, s)
+                                            if isinstance(res, bool) and not res:
+                                                success = False
+                                        if success:
+                                            logger.info("摸鱼成果已通过备用通道成功发送到会话: %s", s)
+                                            return True
+                                        logger.warning("备用通道会话 %s 发送未成功...", s)
+                                    except Exception as err:
+                                        logger.warning("备用通道会话 %s 抛出异常: %s", s, err)
+                            else:
+                                logger.warning("主会话通道发送失败，且未配置备用通道")
+
                             return False
 
                         async def _auto_share(img_path: str, caption: str):
@@ -245,47 +269,129 @@ class PhoneControllerPlugin(MaiBotPlugin):
                 logger.error("自动摸鱼循环异常: %s", e)
                 await asyncio.sleep(600)
 
-    async def _resolve_owner_notification_streams(self) -> Tuple[Optional[str], Optional[str]]:
-        """通过官方 SDK ctx.chat.get_stream_by_user_id API 智能解析主人私聊会话 (主通道与降级备用)"""
+    async def _resolve_owner_notification_streams(self) -> Tuple[List[str], List[str]]:
+        """智能解析主通知通道与备用通知通道对应的私聊会话流列表。
+
+        用户配置中直接填写 QQ 号或 Discord 用户 ID，绝不需要填写底层 32 位会话 ID。
+        主通道优先使用，只有主通道所有可用链路均不通时才切换至备用通道。
+        """
         cfg: PhoneControllerConfig = self.config
-        target = cfg.slack_off.notify_stream_id.strip()
-        fallback = getattr(cfg.slack_off, "fallback_stream_id", "").strip()
+        primary_target = cfg.slack_off.notify_stream_id.strip()
+        fallback_target = getattr(cfg.slack_off, "fallback_stream_id", "").strip()
 
-        # 1. 若用户显式配置了非纯数字且非空的 stream_id（如 32 位 MD5 或其他特定流 ID），直接使用
-        if target and not target.isdigit():
-            return target, fallback
-
-        # 2. 提取配置的所有主人账号列表（完全由用户在 device.owner_qq 配置，绝不硬编码）
+        # 提取配置的主人账号列表
         owner_accounts: List[str] = [
             p.strip()
             for p in cfg.device.owner_qq.replace("，", ",").split(",")
             if p.strip()
         ]
 
-        found_streams: List[str] = []
+        # 1. 若主通道留空，默认以主人列表中的首个账号作为主目标
+        if not primary_target and owner_accounts:
+            primary_target = owner_accounts[0]
 
-        # 3. 通过官方 capability 接口查找主人在各个平台上的私聊流 (支持 qq 与 discord 平台)
-        for owner in owner_accounts:
+        # 2. 解析主通道会话列表
+        primary_streams = await self._resolve_streams_by_account(primary_target) if primary_target else []
+
+        # 3. 解析备用通道会话列表 (仅当用户显式配置了 fallback_target 时解析，避免未经允许误串台)
+        fallback_streams: List[str] = []
+        if fallback_target:
+            fallback_streams = await self._resolve_streams_by_account(fallback_target)
+
+        # 兜底保底：如果主通道未解析到任何会话，尝试最近活跃的主人会话
+        if not primary_streams and self._last_owner_stream_id:
+            primary_streams = [self._last_owner_stream_id]
+
+        return primary_streams, fallback_streams
+
+    async def _resolve_streams_by_account(self, target_account: str) -> List[str]:
+        """根据用户填写的 QQ 号、Discord 用户 ID 或机器人账号解析出对应的私聊会话 ID 列表。
+
+        绝不需要用户填写 32 位底层会话 ID。
+        如果同一 QQ 用户存在多个会话（例如同时有官方机器人和小号），优先将连接更稳定的官方机器人排在首位。
+        """
+        target = str(target_account or "").strip()
+        if not target:
+            return []
+
+        # 兼容性防御：如果极端情况下用户误填了 32 位十六进制会话 ID
+        if len(target) == 32 and not target.isdigit():
+            try:
+                int(target, 16)
+                return [target]
+            except ValueError:
+                pass
+
+        matched_streams: List[Dict[str, Any]] = []
+
+        # 1. 尝试通过官方 SDK chat.get_private_streams API 获取所有私聊流
+        for plat in ("qq", "discord"):
+            try:
+                res = await self.ctx.chat.get_private_streams(platform=plat)
+                raw_streams = []
+                if isinstance(res, list):
+                    raw_streams = res
+                elif isinstance(res, dict) and "streams" in res:
+                    raw_streams = res.get("streams") or []
+
+                for s in raw_streams:
+                    if not isinstance(s, dict):
+                        continue
+                    # 匹配 user_id（主人的 QQ 号或 Discord ID）或者 account_id（机器人的 QQ 号/ID）
+                    u_id = str(s.get("user_id") or "").strip()
+                    bot_acc = str(s.get("account_id") or "").strip()
+                    if u_id == target or bot_acc == target:
+                        matched_streams.append(s)
+            except Exception as e:
+                logger.debug("通过 get_private_streams 查询平台 %s 异常: %s", plat, e)
+
+        # 2. 如果未在列表中匹配到，尝试使用 get_stream_by_user_id 单独查找
+        if not matched_streams:
             for plat in ("qq", "discord"):
                 try:
-                    res = await self.ctx.chat.get_stream_by_user_id(user_id=owner, platform=plat)
+                    res = await self.ctx.chat.get_stream_by_user_id(user_id=target, platform=plat)
                     s_id = None
                     if isinstance(res, dict):
                         s_id = res.get("stream_id") or res.get("session_id")
                     elif res is not None:
                         s_id = getattr(res, "stream_id", None) or getattr(res, "session_id", None)
-                    if s_id and str(s_id) not in found_streams:
-                        found_streams.append(str(s_id))
+                    if s_id:
+                        matched_streams.append({
+                            "session_id": str(s_id),
+                            "platform": plat,
+                            "user_id": target,
+                            "account_id": "",
+                        })
                 except Exception as e:
-                    logger.debug("通过 ctx.chat.get_stream_by_user_id 查找会话异常 (%s, %s): %s", owner, plat, e)
+                    logger.debug("通过 get_stream_by_user_id 查询 %s 异常: %s", target, e)
 
-        primary_stream = found_streams[0] if len(found_streams) >= 1 else None
-        secondary_stream = found_streams[1] if len(found_streams) >= 2 else None
+        if not matched_streams:
+            return []
 
-        final_target = primary_stream or target or self._last_owner_stream_id
-        final_fallback = fallback or secondary_stream
+        # 3. 核心排序策略：
+        # 对于 QQ 会话，官方机器人流（bot account != 3131124785 且不包含 napcat）排在首位，NapCat 小号排在后面
+        def _stream_priority(item: Dict[str, Any]) -> int:
+            plat = item.get("platform", "")
+            bot_acc = str(item.get("account_id") or "")
+            if plat == "qq":
+                # 官方机器人账号（非 3131124785 小号）最优先
+                if bot_acc and bot_acc != "3131124785":
+                    return 0
+                return 1
+            elif plat == "discord":
+                return 2
+            return 3
 
-        return final_target, final_fallback
+        matched_streams.sort(key=_stream_priority)
+
+        # 去重提取 session_id
+        result_session_ids: List[str] = []
+        for s in matched_streams:
+            sid = str(s.get("session_id") or s.get("stream_id") or "").strip()
+            if sid and sid not in result_session_ids:
+                result_session_ids.append(sid)
+
+        return result_session_ids
 
     # -------------------------------------------------------------------------
     # 安全防御辅助
