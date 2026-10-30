@@ -24,6 +24,7 @@ from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from .adb_engine import AdbEngine
 from .config import PhoneControllerConfig
+from .recorder import ScreenRecorder
 from .slacker import SlackerEngine
 
 logger = logging.getLogger("plugin.phone_controller")
@@ -37,6 +38,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
     def __init__(self):
         super().__init__()
         self.adb: Optional[AdbEngine] = None
+        self.recorder: Optional[ScreenRecorder] = None
         self.slacker: Optional[SlackerEngine] = None
         self._auto_slack_task: Optional[asyncio.Task] = None
         self._last_owner_stream_id: str = ""
@@ -46,12 +48,14 @@ class PhoneControllerPlugin(MaiBotPlugin):
         cfg: PhoneControllerConfig = self.config
         logger.info("正在加载手机管家插件: v%s", cfg.plugin.version)
 
-        # 初始化 ADB 控制引擎与自主摸鱼引擎
+        # 初始化 ADB 控制引擎、自主摸鱼引擎与屏幕录制引擎
         self.adb = AdbEngine(
             adb_path=cfg.device.adb_path,
             device_serial=cfg.device.device_serial,
         )
         self.slacker = SlackerEngine(self.adb, runtime_dir=self._get_runtime_dir())
+        ffmpeg_bin = getattr(getattr(cfg, "screen_record", None), "ffmpeg_path", "ffmpeg") or "ffmpeg"
+        self.recorder = ScreenRecorder(self.adb, ffmpeg_path=ffmpeg_bin)
 
         # 若配置了默认无线连接 IP 和端口，尝试自动静默连接
         if cfg.device.default_host and not cfg.device.device_serial:
@@ -267,7 +271,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
                                 logger.debug("调用宿主 LLM 生成摸鱼配文失败: %s", e)
                             return ""
 
-                        # 执行自主摸鱼
+                        # 执行自主摸鱼（支持深入点击浏览详情页）
                         res = await self.slacker.run_slacking_session(
                             app_name=target_app,
                             duration_seconds=cfg.slack_off.session_duration_seconds,
@@ -278,6 +282,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
                             custom_llm_key=cfg.slack_off.custom_llm_key,
                             custom_llm_model=cfg.slack_off.custom_llm_model,
                             llm_caller=_llm_comment,
+                            enable_deep_read=getattr(cfg.slack_off, "enable_deep_read", True),
                         )
 
                         # 若开启了结算播报，且本轮未发送过截图分享，会话结束时向主人发送一条简短打卡总结
@@ -981,23 +986,99 @@ class PhoneControllerPlugin(MaiBotPlugin):
             return {"success": False, "message": f"宏连招执行异常: {e}"}
 
     # -------------------------------------------------------------------------
-    # 4. 拟人化自主摸鱼 (数字生命模式)
+    # 4. 动态录屏感知 (phone_record_screen)
+    # -------------------------------------------------------------------------
+
+    @Tool(
+        "phone_record_screen",
+        description="录制受控手机屏幕指定秒数的动态操作，并自动抽帧成多张关键帧图片发送到当前会话供查看与视觉分析。",
+        parameters=[
+            ToolParameterInfo(
+                name="seconds",
+                param_type=ToolParamType.INTEGER,
+                description="录屏秒数 (2~20 秒，默认 5 秒)",
+                required=False,
+            ),
+            ToolParameterInfo(
+                name="frames",
+                param_type=ToolParamType.INTEGER,
+                description="抽取的关键帧数量 (1~8 张，默认 4 张)",
+                required=False,
+            ),
+            ToolParameterInfo(
+                name="send_to_chat",
+                param_type=ToolParamType.BOOLEAN,
+                description="是否将提取的关键帧图片自动发送到当前聊天窗口中，默认 True",
+                required=False,
+            ),
+        ],
+        timeout_ms=120000,
+    )
+    async def handle_phone_record_screen(
+        self,
+        seconds: int = 5,
+        frames: int = 4,
+        send_to_chat: bool = True,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        auth_ok, msg = self._check_owner_auth(kwargs)
+        if not auth_ok:
+            return {"success": False, "message": msg}
+
+        cfg: PhoneControllerConfig = self.config
+        if not getattr(cfg, "screen_record", None) or not cfg.screen_record.enabled:
+            return {"success": False, "message": "手机录屏功能已被管理员在配置中禁用"}
+
+        rec_sec = max(2, min(seconds, getattr(cfg.screen_record, "max_duration", 30)))
+        rec_frames = max(1, min(frames, 8))
+        out_dir = os.path.join(self._get_runtime_dir(), f"rec_{int(time.time())}")
+
+        ok, frame_paths, err = await self.recorder.record_and_extract_frames(
+            duration_seconds=rec_sec,
+            frame_count=rec_frames,
+            output_dir=out_dir,
+        )
+
+        if not ok:
+            return {"success": False, "message": err}
+
+        # 自动将抽帧图片转为 Base64 发送至当前聊天流
+        stream_id = kwargs.get("stream_id")
+        if send_to_chat and stream_id and getattr(cfg.screen_record, "auto_send_frames", True):
+            for p in frame_paths:
+                try:
+                    with open(p, "rb") as f:
+                        img_b64 = base64.b64encode(f.read()).decode("utf-8")
+                    await self.ctx.send.image(img_b64, stream_id)
+                    await asyncio.sleep(0.3)
+                except Exception as e:
+                    logger.warning("关键帧发送至聊天失败: %s", e)
+
+        return {
+            "success": True,
+            "message": f"成功录制 {rec_sec} 秒并提取 {len(frame_paths)} 张关键帧图片",
+            "frame_count": len(frame_paths),
+            "frame_paths": frame_paths,
+        }
+
+    # -------------------------------------------------------------------------
+    # 5. 拟人化自主摸鱼 (数字生命模式)
     # -------------------------------------------------------------------------
 
     @Tool(
         "phone_slack_off",
-        description="【数字生命/自主摸鱼】让麦麦在受控手机上自主摸鱼刷内容（支持 B站/知乎/微博/小红书/网易云），模拟真人手势滑动与停顿阅读，刷到好玩内容时主动给主人发截图吐槽分享。",
+        description="【数字生命/自主摸鱼】让麦麦在受控手机上自主摸鱼刷内容（支持 B站/知乎/小红书/抖音），模拟真人手势滑动、深入点击卡片浏览详情正文与评论，刷到好玩内容时主动给主人发截图吐槽分享。",
         parameters=[
             ToolParameterInfo(
                 name="app",
                 param_type=ToolParamType.STRING,
-                description="想要摸鱼的应用，例如：'b站'、'知乎'、'微博'、'小红书'、'网易云'（默认'b站'）",
+                description="想要摸鱼的应用，例如：'b站'、'知乎'、'小红书'、'抖音'（默认'b站'）",
                 required=False,
             ),
             ToolParameterInfo(
                 name="duration_seconds",
                 param_type=ToolParamType.INTEGER,
-                description="本次摸鱼持续时长（秒），默认 60 秒，最长 300 秒",
+                description="本次摸鱼持续时长（秒），默认 45 秒，最长 120 秒",
                 required=False,
             ),
             ToolParameterInfo(
@@ -1007,11 +1088,12 @@ class PhoneControllerPlugin(MaiBotPlugin):
                 required=False,
             ),
         ],
+        timeout_ms=180000,
     )
     async def handle_phone_slack_off(
         self,
         app: str = "b站",
-        duration_seconds: int = 25,
+        duration_seconds: int = 45,
         share_to_chat: bool = True,
         **kwargs,
     ) -> Dict[str, Any]:
@@ -1023,8 +1105,8 @@ class PhoneControllerPlugin(MaiBotPlugin):
         if not cfg.slack_off.enabled:
             return {"success": False, "message": "自主摸鱼功能已在插件配置中关闭"}
 
-        # 对话交互场景下摸鱼时长上限设为 35 秒，确保总耗时在 Host RPC 60s 超时内
-        duration = max(10, min(duration_seconds, 35))
+        # 声明了 timeout_ms=180000 (3分钟)，对话调用最长放宽至 120 秒深度摸鱼
+        duration = max(10, min(duration_seconds, 120))
         stream_id = kwargs.get("stream_id")
 
         async def _on_share(image_path: str, caption: str):
@@ -1061,6 +1143,7 @@ class PhoneControllerPlugin(MaiBotPlugin):
             custom_llm_key=cfg.slack_off.custom_llm_key,
             custom_llm_model=cfg.slack_off.custom_llm_model,
             llm_caller=_llm_comment,
+            enable_deep_read=getattr(cfg.slack_off, "enable_deep_read", True),
         )
         return res
 

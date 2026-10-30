@@ -140,6 +140,12 @@ custom_llm_model = "gpt-3.5-turbo"
 
 ## 📝 Changelog
 
+### 🚀 v1.1.3 (2026-10-30) - Screen Record Extraction, Deep Reading & Timeout Breakthrough
+* 🎬 **`phone_record_screen` Integrated**: Silent on-device recording with FFmpeg-extracted keyframe images sent via Base64.
+* 🔍 **Deep Detail Browsing (`enable_deep_read`)**: Actively taps into center highlight cards to browse full articles/videos and comments before returning to feed.
+* ⏱️ **60s RPC Timeout Breakthrough**: Explicitly declares `timeout_ms=180000` (3 mins) on tool decorators, lifting Host default 60s restriction for long-running slacking and recording.
+* 💾 **Persistent Slacking Timestamp**: Tracks `runtime_state.json` to prevent premature slacking after service restarts or config updates.
+
 ### 🚀 v1.1.2 (2026-10-29) - Clean Account Routing & Primary/Fallback Decoupling
 * 🎯 **Direct Account ID Input**: Both `notify_stream_id` and `fallback_stream_id` now directly accept User QQ number, Bot dedicated QQ number, or Discord User ID, completely eliminating complex 32-character session hashes.
 * 🛡 **Strict Primary/Fallback Isolation**: Slacking finds are always sent to the primary target first. Once delivered, the fallback channel is never touched. Fallback is activated solely when all primary links fail.

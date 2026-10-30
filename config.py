@@ -25,7 +25,7 @@ class PluginSection(PluginConfigBase):
         },
     )
     version: str = Field(
-        default="1.1.2",
+        default="1.1.3",
         description="插件版本",
         json_schema_extra={
             "label": "插件版本",
@@ -33,7 +33,7 @@ class PluginSection(PluginConfigBase):
         },
     )
     config_version: str = Field(
-        default="1.1.2",
+        default="1.1.3",
         description="配置版本(Runner 校验)",
         json_schema_extra={
             "label": "配置结构版本",
@@ -214,6 +214,14 @@ class SlackOffSection(PluginConfigBase):
             "hint": "刷到有趣爆款内容时，是否自动抓取高清截图主动私聊发给主人吐槽",
         },
     )
+    enable_deep_read: bool = Field(
+        default=True,
+        description="摸鱼时是否点击感兴趣的卡片深入浏览详情页（阅读正文与评论区）",
+        json_schema_extra={
+            "label": "深入浏览详情页",
+            "hint": "开启后麦麦不仅在信息流滑动，遇到有趣的卡片还会点击进入详情页阅读正文或评论区，截取大图后再返回列表",
+        },
+    )
     notify_summary: bool = Field(
         default=False,
         description="摸鱼结束时是否发送打卡结算简报（默认 false：仅抓到精彩截图时才向主人发送，其余时间静默摸鱼免打扰）",
@@ -287,9 +295,71 @@ class SlackOffSection(PluginConfigBase):
     )
 
 
+class ScreenRecordSection(PluginConfigBase):
+    """录屏感知配置"""
+
+    __ui_label__: ClassVar[str] = "录屏感知"
+    __ui_icon__: ClassVar[str] = "video"
+    __ui_order__: ClassVar[int] = 3
+
+    enabled: bool = Field(
+        default=True,
+        description="是否启用手机录屏与抽帧能力",
+        json_schema_extra={
+            "label": "启用屏幕录制与抽帧",
+            "hint": "开启后麦麦可调用 phone_record_screen 工具录制手机动态操作并抽帧发送到聊天窗口",
+        },
+    )
+    default_duration: int = Field(
+        default=5,
+        description="默认录屏时长(秒)",
+        json_schema_extra={
+            "label": "默认录屏时长 (秒)",
+            "hint": "单次录制秒数 (建议 3~15 秒，避免视频文件过大)",
+            "placeholder": "5",
+        },
+    )
+    max_duration: int = Field(
+        default=30,
+        description="单次最大录屏时长(秒)",
+        json_schema_extra={
+            "label": "单次最大录屏时长 (秒)",
+            "hint": "允许单次录制的最大上限秒数 (最长 30 秒)",
+            "placeholder": "30",
+        },
+    )
+    default_frames: int = Field(
+        default=4,
+        description="录屏完成后抽取的关键帧数量",
+        json_schema_extra={
+            "label": "抽取的关键帧数量",
+            "hint": "将录制视频拆分提取并发送的图片张数 (建议 2~6 张)",
+            "placeholder": "4",
+        },
+    )
+    auto_send_frames: bool = Field(
+        default=True,
+        description="抽帧完成后是否自动把关键帧图片发送到当前会话",
+        json_schema_extra={
+            "label": "自动发送抽帧图片到聊天",
+            "hint": "开启后提取的连续关键帧图片会自动发送到当前对话流中",
+        },
+    )
+    ffmpeg_path: str = Field(
+        default="ffmpeg",
+        description="服务器 ffmpeg 执行路径",
+        json_schema_extra={
+            "label": "FFmpeg 执行路径",
+            "hint": "服务器 ffmpeg 可执行文件路径，默认填 ffmpeg 即可（自动从环境变量寻找）",
+            "placeholder": "ffmpeg",
+        },
+    )
+
+
 class PhoneControllerConfig(PluginConfigBase):
     """phone_controller 顶层配置模型"""
 
     plugin: PluginSection = Field(default_factory=PluginSection)
     device: DeviceSection = Field(default_factory=DeviceSection)
     slack_off: SlackOffSection = Field(default_factory=SlackOffSection)
+    screen_record: ScreenRecordSection = Field(default_factory=ScreenRecordSection)

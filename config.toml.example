@@ -11,8 +11,8 @@
 # ------------------------------------------------------------------------------
 [plugin]
 name = "phone_controller"
-version = "1.1.2"
-config_version = "1.1.2"
+version = "1.1.3"
+config_version = "1.1.3"
 enabled = true                                  # 是否开启本插件 (true=开启, false=关闭)
 
 # ------------------------------------------------------------------------------
@@ -101,6 +101,10 @@ preferred_apps = "b站,知乎,小红书,抖音"
 # 刷到精彩/有趣内容时，是否自动抓取高清截图分享给主人 (true=是, false=否)
 share_interesting_finds = true
 
+# 是否开启深度详情页阅读 (true=是, false=仅在信息流滑动)
+# 开启后麦麦不仅在推荐流滑动，遇到感兴趣的卡片还会主动点进去看详情/视频/正文与评论，并截取大图后再返回列表，极具真人感！
+enable_deep_read = true
+
 # 摸鱼结束时是否发送打卡结算简报 (默认 false)
 # - false (推荐)：极简防打扰模式。平时安静摸鱼，只有真正抓到了有趣的精彩截图时，才会带图找你吐槽；
 # - true：打卡汇报模式。每次摸鱼结束锁屏前，即便没抓到特定大图，也会发一句文字打卡告诉你她刚玩了什么。
@@ -133,3 +137,14 @@ fallback_stream_id = ""
 custom_llm_url = ""                             # 第三方 API 端点 (例如 "https://api.openai.com/v1/chat/completions")
 custom_llm_key = ""                             # 第三方 API Key
 custom_llm_model = "gpt-3.5-turbo"              # 第三方模型名称
+
+# ------------------------------------------------------------------------------
+# 4. 手机录屏与视频抽帧 (可选·高级视觉感知)
+# ------------------------------------------------------------------------------
+[screen_record]
+enabled = true                                   # 是否启用手机录屏与抽帧 (true=启用, false=禁用)
+default_duration = 5                             # 默认录屏时长 (单位：秒，建议 3~15 秒)
+max_duration = 30                                # 单次最大允许录制时长 (秒)
+default_frames = 4                               # 录制后抽取的关键帧数量 (建议 2~6 张)
+auto_send_frames = true                          # 抽帧完成后是否自动将图片发送到当前会话
+ffmpeg_path = "ffmpeg"                           # 服务器 ffmpeg 工具路径（默认填 ffmpeg 即可）

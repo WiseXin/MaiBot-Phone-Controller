@@ -151,8 +151,8 @@ class SlackerEngine:
 
         return txt
 
-    async def extract_screen_topics(self) -> List[str]:
-        """抓取当前屏幕黄金视觉中心区域的高质量真实内容（按距离屏幕中心距离排序，确保截图与标题完全对齐）"""
+    async def extract_screen_cards(self) -> List[Dict[str, Any]]:
+        """抓取当前屏幕黄金视觉中心区域的高质量真实内容卡片（按距离屏幕中心距离排序，包含标题与点击中心坐标）"""
         ok, elements, _ = await self.adb.dump_ui_elements()
         if not ok or not elements:
             return []
@@ -163,11 +163,12 @@ class SlackerEngine:
         min_y = screen_h * 0.18
         max_y = screen_h * 0.85
 
-        scored_topics: List[Tuple[float, str]] = []
+        scored_cards: List[Tuple[float, Dict[str, Any]]] = []
         seen = set()
 
         for el in elements:
-            cy = el.get("center", [0, 0])[1]
+            center = el.get("center", [540, 1000])
+            cy = center[1]
             if not (min_y <= cy <= max_y):
                 continue
 
@@ -176,11 +177,20 @@ class SlackerEngine:
             if cleaned and cleaned not in seen:
                 seen.add(cleaned)
                 dist = abs(cy - center_y)
-                scored_topics.append((dist, cleaned))
+                scored_cards.append((dist, {
+                    "title": cleaned,
+                    "center": center,
+                    "bounds": el.get("bounds", []),
+                }))
 
         # 按距离屏幕纵向中心由近及远排序，排在第 1 位的必定是屏幕最正中、最抓眼的焦点大图/文章
-        scored_topics.sort(key=lambda x: x[0])
-        return [t[1] for t in scored_topics[:10]]
+        scored_cards.sort(key=lambda x: x[0])
+        return [c[1] for c in scored_cards[:10]]
+
+    async def extract_screen_topics(self) -> List[str]:
+        """向后兼容：抓取当前屏幕黄金视觉中心区域的高质量真实内容标题列表"""
+        cards = await self.extract_screen_cards()
+        return [c["title"] for c in cards]
 
     @staticmethod
     def _is_safe_custom_url(url: str) -> bool:
@@ -378,13 +388,14 @@ class SlackerEngine:
         custom_llm_key: str = "",
         custom_llm_model: str = "",
         llm_caller: Optional[Callable[[str], Any]] = None,
+        enable_deep_read: bool = True,
     ) -> Dict[str, Any]:
         """
         执行一次拟人化自主摸鱼会话：
         1. 唤醒并启动指定 App
         2. 周期性真人滑动、模拟阅读停顿
-        3. 嗅探有趣内容
-        4. 触发分享回调
+        3. 嗅探有趣内容（支持点击进入详情页深度阅读）
+        4. 触发分享回调并返回列表
         """
         if self.is_slacking:
             return {"success": False, "message": "麦麦当前正在摸鱼中，请稍后再试"}
@@ -417,6 +428,8 @@ class SlackerEngine:
             start_time = time.time()
             swipe_count = 0
             has_shared_snapshot = False
+            deep_read_done = False
+            is_douyin = app_name.lower() in ("抖音", "douyin", "aweme") or target_pkg == "com.ss.android.ugc.aweme"
 
             while time.time() - start_time < duration_seconds:
                 # 防误触广告跳转：如果意外跳出了目标应用，自动按返回键拉回前台
@@ -439,13 +452,69 @@ class SlackerEngine:
                 pause_time = random.uniform(interval_min, interval_max)
                 await asyncio.sleep(pause_time)
 
-                # 提取当前屏幕内容
-                topics = await self.extract_screen_topics()
+                # 提取当前屏幕卡片与内容
+                cards = await self.extract_screen_cards()
+                topics = [c["title"] for c in cards]
                 if topics:
                     discovered_contents.extend(topics)
 
-                # 滑动 2 次以上、抓取到了真实优质标题且本轮尚未分享过，稳定截一张高清图分享给主人（单轮精选 1 张，绝不刷屏）
-                if not has_shared_snapshot and swipe_count >= 2 and topics and share_callback:
+                # 深度详情浏览逻辑：
+                # 对于非全屏切视频的图文/视频应用（B站/知乎/小红书），滑动 2 次后若遇到心动卡片且本轮尚未深入点击过，点击卡片进入详情页！
+                if enable_deep_read and not deep_read_done and swipe_count >= 2 and cards and not is_douyin:
+                    target_card = cards[0]
+                    card_title = target_card["title"]
+                    cx, cy = target_card.get("center", [540, 1000])
+
+                    logger.info("【深度浏览】小蓝被《%s》吸引，点击卡片 (%d, %d) 进入详情页...", card_title, cx, cy)
+                    await self.adb.tap(cx, cy)
+                    deep_read_done = True
+
+                    # 等待详情页渲染展开
+                    await asyncio.sleep(2.0)
+
+                    # 模拟在详情页停顿观看正文/视频 (3.5 ~ 6 秒)
+                    read_sec = random.uniform(3.5, 6.0)
+                    await asyncio.sleep(read_sec)
+
+                    # 优先在详情页截图分享（此时画面是完整详情大图/正文，比信息流小图更具现场感）
+                    if not has_shared_snapshot and share_callback:
+                        shot_path = os.path.join(self.runtime_dir, f"slack_find_{session_id}_{swipe_count}_detail.jpg")
+                        ok, res = await self.adb.capture_screenshot(shot_path, quality=75)
+                        if ok:
+                            has_shared_snapshot = True
+                            shared_snapshots.append(shot_path)
+                            msg = await self.generate_lively_comment(
+                                display_name,
+                                card_title,
+                                topics[1:4],
+                                custom_llm_url=custom_llm_url,
+                                custom_llm_key=custom_llm_key,
+                                custom_llm_model=custom_llm_model,
+                                llm_caller=llm_caller,
+                            )
+                            try:
+                                await share_callback(shot_path, msg)
+                            except Exception as e:
+                                logger.warning("摸鱼详情分享回调执行失败: %s", e)
+
+                    # 模拟在详情页小幅微滑看评论或长文
+                    await asyncio.sleep(1.0)
+                    await self.adb.swipe(540, 1500, 540, 1000, 300)
+                    await asyncio.sleep(1.5)
+
+                    # 看完轻按返回键回到推荐列表
+                    logger.info("【深度浏览】看完详情，按返回键退回列表流")
+                    await self.adb.press_key("back")
+                    await asyncio.sleep(1.2)
+
+                    # 安全看门狗检查：若一次返回未退出，再补一次返回
+                    cur_st = await self.adb.get_status()
+                    if cur_st.get("foreground_package") != target_pkg:
+                        await self.adb.open_app(target_pkg)
+                        await asyncio.sleep(1.5)
+
+                # 普通流内分享兜底（如抖音或未触发详情页点击）
+                elif not has_shared_snapshot and swipe_count >= 2 and topics and share_callback:
                     # 抓取一张截图
                     shot_path = os.path.join(self.runtime_dir, f"slack_find_{session_id}_{swipe_count}.jpg")
                     ok, res = await self.adb.capture_screenshot(shot_path, quality=75)
