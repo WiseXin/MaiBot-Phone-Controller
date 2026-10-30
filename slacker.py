@@ -105,35 +105,52 @@ class SlackerEngine:
             if ad_found:
                 continue
 
-            # 2. 扫描是否处于“登录拦截页”、“协议条款弹窗”或“底部登录抽屉”
+            # 2. 扫描是否处于“登录拦截页”、“协议条款弹窗”、“挽留弹窗”、“悬浮窗提示”或“青少年弹窗”
             all_texts = " ".join(el.get("text", "") for el in elements)
             login_keywords = [
                 "登录知乎", "微信一键登录", "其他登录方式", "登录体验", "手机号一键登录",
                 "手机号登录", "登录后继续操作", "登录后享受更多精彩", "请阅读并同意以下条款",
                 "请阅读并同意", "同意并继续", "登录/注册", "立即登录", "去登录",
+                "要放弃登录吗", "放弃登录", "你将错过以下有趣体验", "开启青少年模式",
+                "开启悬浮窗功能", "悬浮窗权限",
             ]
             is_login_page = any(kw in all_texts for kw in login_keywords)
 
             if not is_login_page:
                 break
 
-            logger.info("检测到应用进入登录拦截页或条款弹窗，启动自动规避跳过...")
+            logger.info("检测到应用进入登录拦截页、挽留弹窗或条款提示，启动自动规避跳过...")
             dismiss_clicked = False
 
-            # 2.1 优先寻找任何 resource_id 包含 close / cancel / dismiss 的可点击控件 (如 id=com.zhihu.android:id/close)
-            for el in elements:
-                rid = el.get("resource_id", "").lower()
-                clickable = el.get("clickable", False)
-                center = el.get("center", [0, 0])
-                if clickable and any(k in rid for k in ("close", "cancel", "dismiss", "exit")):
-                    logger.info("点击 close 控件关闭弹窗: %s at %s", rid, center)
-                    await self.adb.tap(center[0], center[1])
-                    dismiss_clicked = True
-                    await asyncio.sleep(1.0)
-                    total_dismissed = True
+            # 2.1 优先点击弹窗上的确定跳过/放弃登录/我知道了/暂不开启等语义文字按钮
+            for action_txt in ("坚持退出", "我知道了", "暂不开启", "暂不授予", "以后再说", "取消", "暂不登录", "关闭"):
+                for el in elements:
+                    t_val = (el.get("text") or el.get("desc") or "").strip()
+                    if el.get("clickable", False) and t_val == action_txt:
+                        logger.info("点击弹窗语义选项: %s at %s", action_txt, el["center"])
+                        await self.adb.tap(el["center"][0], el["center"][1])
+                        dismiss_clicked = True
+                        await asyncio.sleep(1.0)
+                        total_dismissed = True
+                        break
+                if dismiss_clicked:
                     break
 
-            # 2.2 如果没找到具名 close 控件，扫描屏幕角部或弹窗右上角的关闭图标
+            # 2.2 寻找任何 resource_id 包含 close / cancel / dismiss 的可点击控件 (如 id=com.zhihu.android:id/close)
+            if not dismiss_clicked:
+                for el in elements:
+                    rid = el.get("resource_id", "").lower()
+                    clickable = el.get("clickable", False)
+                    center = el.get("center", [0, 0])
+                    if clickable and any(k in rid for k in ("close", "cancel", "dismiss", "exit")):
+                        logger.info("点击 close 控件关闭弹窗: %s at %s", rid, center)
+                        await self.adb.tap(center[0], center[1])
+                        dismiss_clicked = True
+                        await asyncio.sleep(1.0)
+                        total_dismissed = True
+                        break
+
+            # 2.3 扫描屏幕角部或弹窗右上角的关闭图标 (左上角返回叉号或右上角关闭叉号)
             if not dismiss_clicked:
                 for el in elements:
                     center = el.get("center", [0, 0])
@@ -146,8 +163,16 @@ class SlackerEngine:
                         await asyncio.sleep(1.0)
                         total_dismissed = True
                         break
+                    # 右上角小叉号
+                    if (center[0] > 850 and center[1] < 450) and clickable:
+                        logger.info("点击右上角关闭叉号退出弹窗: %s", center)
+                        await self.adb.tap(center[0], center[1])
+                        dismiss_clicked = True
+                        await asyncio.sleep(1.0)
+                        total_dismissed = True
+                        break
 
-            # 2.3 如果未能通过点击关闭，直接发送系统返回键 (back)
+            # 2.4 如果未能通过点击关闭，直接发送系统返回键 (back)
             if not dismiss_clicked:
                 logger.info("未找到关闭控件，发送系统返回键 (back) 尝试退出登录弹窗")
                 await self.adb.press_key("back")
@@ -171,8 +196,12 @@ class SlackerEngine:
         if re.fullmatch(r"[A-Za-z0-9_\s,\.\-]+", txt):
             return None
 
-        # 1. 小红书卡片专属格式解析: "笔记  <标题> 来自<作者> <赞数>赞" 或 "<标题> 来自<作者>..."
-        m_xhs = re.match(r"^(?:笔记\s+)?(.*?)\s+来自.*$", txt)
+        # 过滤纯播放量/指标量词 (如 "185.2万", "44.2万", "367.7万", "1.2亿")
+        if re.fullmatch(r"^\d+(\.\d+)?[万千亿]?$", txt):
+            return None
+
+        # 1. 小红书/短视频前缀与作者信息解析: "笔记/视频/图文  <标题> 来自<作者>..."
+        m_xhs = re.match(r"^(?:笔记|视频|图文)\s+(.*?)(?:\s+来自.*)?$", txt)
         if m_xhs:
             txt = m_xhs.group(1).strip()
 
@@ -181,7 +210,8 @@ class SlackerEngine:
             "首页", "我的", "消息", "动态", "搜索", "关注", "推荐", "热门", "游戏中心",
             "个人主页", "返回", "设置", "分享", "评论", "点赞", "收藏", "投币", "转发",
             "换一换", "刷新", "频道", "发布", "拍摄", "拍摄动态", "查看详情",
-            "登录查看更多精彩内容", "去登录", "立即登录", "展开", "收起"
+            "登录查看更多精彩内容", "去登录", "立即登录", "展开", "收起",
+            "发现抖音朋友", "查看通讯录好友", "开启青少年模式", "我知道了", "暂不开启",
         }
         if txt in blacklist:
             return None
@@ -193,6 +223,8 @@ class SlackerEngine:
             "去登录", "登录/注册", "注册账号", "请阅读并同意", "服务协议", "隐私政策",
             "个人信息保护指引", "同意并继续", "同意条款", "暂不登录", "账号密码登录",
             "验证码登录", "找回密码", "已有账号", "需登录", "点击登录", "账号异常", "登录后",
+            "要放弃登录吗", "你将错过以下有趣体验", "坚持退出", "继续登录", "点赞收藏",
+            "私信好友", "评论互动",
         ]
         if any(kw in txt for kw in login_noise):
             return None
@@ -223,11 +255,14 @@ class SlackerEngine:
         for p in noise_sub:
             txt = re.sub(p, "", txt, flags=re.IGNORECASE).strip()
 
-        # 4. 统计指标或热度标签过滤 (如 "7740 万人正在热议"、"赞同1141"、"1.9 万人关注")
+        # 4. 统计指标或热度标签过滤 (如 "7740 万人正在热议"、"赞同1141"、"1.9 万人关注"、"260.2万粉丝"、"1170视频")
         stat_patterns = [
             r".*人(?:正在热议|热议|在看|关注|赞同).*",
             r"^赞同\s*\d+.*",
             r".*次?(?:播放|播放量|获赞|点赞|条评论).*",
+            r".*粉丝.*",
+            r"^\d+\s*视频$",
+            r"^\d+(\.\d+)?[万千亿]?$",
         ]
         for sp in stat_patterns:
             if re.search(sp, txt):
@@ -609,29 +644,34 @@ class SlackerEngine:
                         await self.adb.open_app(target_pkg)
                         await asyncio.sleep(1.5)
 
-                # 普通流内分享兜底（如抖音或未触发详情页点击）
-                elif not has_shared_snapshot and swipe_count >= 2 and topics and share_callback:
-                    # 抓取一张截图
-                    shot_path = os.path.join(self.runtime_dir, f"slack_find_{session_id}_{swipe_count}.jpg")
-                    ok, res = await self.adb.capture_screenshot(shot_path, quality=75)
-                    if ok:
-                        has_shared_snapshot = True
-                        shared_snapshots.append(shot_path)
-                        best_title = topics[0]
-                        # 生成有梗、活泼的少女感总结吐槽
-                        msg = await self.generate_lively_comment(
-                            display_name,
-                            best_title,
-                            topics[1:4],
-                            custom_llm_url=custom_llm_url,
-                            custom_llm_key=custom_llm_key,
-                            custom_llm_model=custom_llm_model,
-                            llm_caller=llm_caller,
-                        )
-                        try:
-                            await share_callback(shot_path, msg)
-                        except Exception as e:
-                            logger.warning("摸鱼分享回调执行失败: %s", e)
+                # 普通流内分享兜底（如抖音全屏流，或未触发详情页点击）
+                elif not has_shared_snapshot and swipe_count >= 2 and share_callback:
+                    # 针对抖音等短视频应用，若高频动态渲染导致 UI 树未能抓到文字，使用默认话题兜底视觉截图分享
+                    if not topics and is_douyin:
+                        topics = ["刷到的抖音热门短视频"]
+
+                    if topics:
+                        # 抓取一张截图
+                        shot_path = os.path.join(self.runtime_dir, f"slack_find_{session_id}_{swipe_count}.jpg")
+                        ok, res = await self.adb.capture_screenshot(shot_path, quality=75)
+                        if ok:
+                            has_shared_snapshot = True
+                            shared_snapshots.append(shot_path)
+                            best_title = topics[0]
+                            # 生成有梗、活泼的少女感总结吐槽
+                            msg = await self.generate_lively_comment(
+                                display_name,
+                                best_title,
+                                topics[1:4],
+                                custom_llm_url=custom_llm_url,
+                                custom_llm_key=custom_llm_key,
+                                custom_llm_model=custom_llm_model,
+                                llm_caller=llm_caller,
+                            )
+                            try:
+                                await share_callback(shot_path, msg)
+                            except Exception as e:
+                                logger.warning("摸鱼分享回调执行失败: %s", e)
 
             # 去重整理摸鱼成果
             unique_topics = list(dict.fromkeys(discovered_contents))[:4]

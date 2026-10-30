@@ -265,16 +265,18 @@ class AdbEngine:
     async def dump_ui_elements(self) -> Tuple[bool, List[Dict[str, Any]], str]:
         """
         导出当前屏幕可交互 UI 节点树，提取文字、类名及中心点击坐标。
+        使用 --compressed 参数避免在抖音等高动态播放界面等待无障碍空闲而超时。
         """
-        # 将 dump 写入手机临时路径并拉取
         remote_xml = "/sdcard/_window_dump.xml"
-        ok, out = await self.run_shell(f"uiautomator dump {remote_xml}", timeout=10.0)
+        ok, out = await self.run_shell(f"uiautomator dump --compressed {remote_xml}", timeout=8.0)
         if not ok or "dumped to" not in out:
-            # 尝试回退方式
-            return False, [], f"uiautomator dump 失败: {out}"
+            # 回退尝试不带参数 dump
+            ok, out = await self.run_shell(f"uiautomator dump {remote_xml}", timeout=6.0)
+            if not ok or "dumped to" not in out:
+                return False, [], f"uiautomator dump 失败: {out}"
 
-        ok, xml_content = await self.run_shell(f"cat {remote_xml}", timeout=10.0)
-        await self.run_shell(f"rm {remote_xml}", timeout=3.0)
+        ok, xml_content = await self.run_shell(f"cat {remote_xml}", timeout=8.0)
+        await self.run_shell(f"rm -f {remote_xml}", timeout=3.0)
 
         if not ok or not xml_content.startswith("<?xml"):
             return False, [], "获取 UI XML 失败或内容为空"
