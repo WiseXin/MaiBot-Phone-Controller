@@ -79,19 +79,90 @@ class SlackerEngine:
 
         return await self.adb.swipe(x1, y1, x2, y2, duration_ms=duration)
 
+    async def dismiss_splash_ad_and_login_popups(self) -> bool:
+        """智能探测并自动跳过开屏广告，并自动关闭各 App 的登录拦截页、隐私授权弹窗或底部半屏抽屉 (支持多层清理)。"""
+        total_dismissed = False
+
+        # 最多连续清理 2 层弹窗 (例如知乎：第一层全屏登录页，关闭后会再弹一层底部半屏登录抽屉)
+        for _ in range(2):
+            ok, elements, _ = await self.adb.dump_ui_elements()
+            if not ok or not elements:
+                break
+
+            # 1. 扫描是否有开屏跳过按钮
+            ad_found = False
+            for el in elements:
+                txt = el.get("text", "").strip()
+                if re.search(r"跳过(?:\s*\d+s?)?|跳过广告", txt, re.IGNORECASE):
+                    center = el.get("center")
+                    if center:
+                        logger.info("已自动点击跳过开屏广告: %s at %s", txt, center)
+                        await self.adb.tap(center[0], center[1])
+                        await asyncio.sleep(1.0)
+                        ad_found = True
+                        total_dismissed = True
+                        break
+            if ad_found:
+                continue
+
+            # 2. 扫描是否处于“登录拦截页”、“协议条款弹窗”或“底部登录抽屉”
+            all_texts = " ".join(el.get("text", "") for el in elements)
+            login_keywords = [
+                "登录知乎", "微信一键登录", "其他登录方式", "登录体验", "手机号一键登录",
+                "手机号登录", "登录后继续操作", "登录后享受更多精彩", "请阅读并同意以下条款",
+                "请阅读并同意", "同意并继续", "登录/注册", "立即登录", "去登录",
+            ]
+            is_login_page = any(kw in all_texts for kw in login_keywords)
+
+            if not is_login_page:
+                break
+
+            logger.info("检测到应用进入登录拦截页或条款弹窗，启动自动规避跳过...")
+            dismiss_clicked = False
+
+            # 2.1 优先寻找任何 resource_id 包含 close / cancel / dismiss 的可点击控件 (如 id=com.zhihu.android:id/close)
+            for el in elements:
+                rid = el.get("resource_id", "").lower()
+                clickable = el.get("clickable", False)
+                center = el.get("center", [0, 0])
+                if clickable and any(k in rid for k in ("close", "cancel", "dismiss", "exit")):
+                    logger.info("点击 close 控件关闭弹窗: %s at %s", rid, center)
+                    await self.adb.tap(center[0], center[1])
+                    dismiss_clicked = True
+                    await asyncio.sleep(1.0)
+                    total_dismissed = True
+                    break
+
+            # 2.2 如果没找到具名 close 控件，扫描屏幕角部或弹窗右上角的关闭图标
+            if not dismiss_clicked:
+                for el in elements:
+                    center = el.get("center", [0, 0])
+                    clickable = el.get("clickable", False)
+                    # 左上角返回/关闭叉号
+                    if (center[0] < 200 and center[1] < 300) and clickable:
+                        logger.info("点击左上角关闭叉号退出登录页: %s", center)
+                        await self.adb.tap(center[0], center[1])
+                        dismiss_clicked = True
+                        await asyncio.sleep(1.0)
+                        total_dismissed = True
+                        break
+
+            # 2.3 如果未能通过点击关闭，直接发送系统返回键 (back)
+            if not dismiss_clicked:
+                logger.info("未找到关闭控件，发送系统返回键 (back) 尝试退出登录弹窗")
+                await self.adb.press_key("back")
+                await asyncio.sleep(1.0)
+                total_dismissed = True
+
+        return total_dismissed
+
     async def dismiss_splash_ad(self) -> bool:
-        """智能探测并自动点击开屏广告的跳过按钮（跳过/跳过广告/关闭）"""
-        for skip_kw in ["跳过", "跳过广告", "关闭"]:
-            ok, _ = await self.adb.tap_text(skip_kw)
-            if ok:
-                logger.info("已自动点击跳过开屏广告: %s", skip_kw)
-                await asyncio.sleep(0.8)
-                return True
-        return False
+        """向后兼容别名：调用统一广告与登录拦截跳过引擎"""
+        return await self.dismiss_splash_ad_and_login_popups()
 
     @staticmethod
     def _clean_topic_title(raw_text: str) -> Optional[str]:
-        """深度清洗屏幕提取文本，坚决剔除按钮、无障碍辅助标签、图标等系统 UI 噪音"""
+        """深度清洗屏幕提取文本，坚决剔除按钮、登录引导、无障碍辅助标签、图标等系统 UI 噪音"""
         txt = raw_text.strip()
         if not txt or len(txt) < 5 or txt.isdigit():
             return None
@@ -113,6 +184,17 @@ class SlackerEngine:
             "登录查看更多精彩内容", "去登录", "立即登录", "展开", "收起"
         }
         if txt in blacklist:
+            return None
+
+        # 3. 坚决过滤登录与授权协议噪音词（防止将“微信一键登录”等误当成热门帖子）
+        login_noise = [
+            "一键登录", "快速登录", "其他登录方式", "登录知乎", "登录b站", "登录小红书",
+            "登录抖音", "手机号登录", "微信登录", "qq登录", "微博登录", "立即登录",
+            "去登录", "登录/注册", "注册账号", "请阅读并同意", "服务协议", "隐私政策",
+            "个人信息保护指引", "同意并继续", "同意条款", "暂不登录", "账号密码登录",
+            "验证码登录", "找回密码", "已有账号", "需登录", "点击登录", "账号异常", "登录后",
+        ]
+        if any(kw in txt for kw in login_noise):
             return None
 
         # 3. 剔除常见的 Android 无障碍辅助描述与统计指标
@@ -140,6 +222,16 @@ class SlackerEngine:
         ]
         for p in noise_sub:
             txt = re.sub(p, "", txt, flags=re.IGNORECASE).strip()
+
+        # 4. 统计指标或热度标签过滤 (如 "7740 万人正在热议"、"赞同1141"、"1.9 万人关注")
+        stat_patterns = [
+            r".*人(?:正在热议|热议|在看|关注|赞同).*",
+            r"^赞同\s*\d+.*",
+            r".*次?(?:播放|播放量|获赞|点赞|条评论).*",
+        ]
+        for sp in stat_patterns:
+            if re.search(sp, txt):
+                return None
 
         txt = txt.strip("，,。 ").strip()
 
@@ -419,10 +511,10 @@ class SlackerEngine:
 
             logger.info("麦麦开始摸鱼啦，正在启动: %s", display_name)
             await self.adb.open_app(target_pkg)
-            # 等待应用冷启动并尝试自动跳过开屏广告
+            # 等待应用冷启动并自动跳过开屏广告与登录/隐私拦截弹窗
             await asyncio.sleep(1.5)
-            await self.dismiss_splash_ad()
-            await asyncio.sleep(1.5)
+            await self.dismiss_splash_ad_and_login_popups()
+            await asyncio.sleep(1.0)
 
             # 3. 循环摸鱼浏览
             start_time = time.time()
@@ -454,6 +546,10 @@ class SlackerEngine:
 
                 # 提取当前屏幕卡片与内容
                 cards = await self.extract_screen_cards()
+                # 若发现屏幕上未能提取到有效内容卡片，可能中途被登录弹窗或广告打断，自愈清理一次弹窗
+                if not cards and swipe_count <= 2:
+                    if await self.dismiss_splash_ad_and_login_popups():
+                        cards = await self.extract_screen_cards()
                 topics = [c["title"] for c in cards]
                 if topics:
                     discovered_contents.extend(topics)

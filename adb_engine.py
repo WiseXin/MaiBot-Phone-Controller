@@ -303,6 +303,7 @@ class AdbEngine:
                         elements.append({
                             "text": label,
                             "type": node.attrib.get("class", "").split(".")[-1],
+                            "resource_id": node.attrib.get("resource-id", "").strip(),
                             "center": [cx, cy],
                             "bounds": [x1, y1, x2, y2],
                             "clickable": clickable,
@@ -313,22 +314,44 @@ class AdbEngine:
             return False, [], f"XML 解析失败: {e}"
 
     async def find_element_by_text(self, target_text: str) -> Optional[Tuple[int, int]]:
-        """在当前界面寻找匹配文字的中心坐标"""
+        """在当前界面寻找匹配文字的中心坐标 (支持精准匹配、模糊匹配及关闭/叉号/跳过图标语义增强)"""
         ok, elements, _ = await self.dump_ui_elements()
         if not ok:
             return None
 
         target = target_text.strip().lower()
 
-        # 1. 优先完全一致匹配
+        # 1. 优先完全一致匹配 (对比 text 与 content-desc)
         for el in elements:
             if el["text"].lower() == target:
                 return el["center"][0], el["center"][1]
 
         # 2. 包含匹配
         for el in elements:
-            if target in el["text"].lower():
+            if target and target in el["text"].lower():
                 return el["center"][0], el["center"][1]
+
+        # 3. 语义近义词扩展匹配 (例如用户指示 "关闭" / "叉号" / "跳过" / "取消" / "X")
+        # 很多 App 弹窗与登录页的叉号是纯图标，无 text 或 content-desc，需依据 resource-id 或角部特征定位
+        if any(kw in target for kw in ("关闭", "叉号", "x", "close", "取消", "跳过", "暂不")):
+            # 3.1 优先查找 resource_id 包含关闭语义的控件
+            for el in elements:
+                rid = el.get("resource_id", "").lower()
+                if any(k in rid for k in ("close", "cancel", "dismiss", "btn_back", "iv_back", "exit")):
+                    logger.info("通过 resource_id 智能命中关闭控件: %s at %s", rid, el["center"])
+                    return el["center"][0], el["center"][1]
+
+            # 3.2 查找位于屏幕左上角 (x<200, y<300) 或右上角 (x>880, y<300) 的小型可点击图标 (w<220, h<220)
+            for el in elements:
+                if not el.get("clickable"):
+                    continue
+                w = el["bounds"][2] - el["bounds"][0]
+                h = el["bounds"][3] - el["bounds"][1]
+                if 20 <= w <= 220 and 20 <= h <= 220:
+                    cx, cy = el["center"]
+                    if (cx < 200 and cy < 300) or (cx > 880 and cy < 300):
+                        logger.info("通过屏幕角部特征智能命中关闭图标: bounds=%s center=(%s,%s)", el["bounds"], cx, cy)
+                        return cx, cy
 
         return None
 
